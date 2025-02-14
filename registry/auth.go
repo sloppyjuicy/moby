@@ -1,27 +1,25 @@
 package registry // import "github.com/docker/docker/registry"
 
 import (
+	"context"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
+	"github.com/containerd/log"
 	"github.com/docker/distribution/registry/client/auth"
 	"github.com/docker/distribution/registry/client/auth/challenge"
 	"github.com/docker/distribution/registry/client/transport"
-	"github.com/docker/docker/api/types"
-	registrytypes "github.com/docker/docker/api/types/registry"
+	"github.com/docker/docker/api/types/registry"
 	"github.com/pkg/errors"
-	"github.com/sirupsen/logrus"
 )
 
-const (
-	// AuthClientID is used the ClientID used for the token server
-	AuthClientID = "docker"
-)
+// AuthClientID is used the ClientID used for the token server
+const AuthClientID = "docker"
 
 type loginCredentialStore struct {
-	authConfig *types.AuthConfig
+	authConfig *registry.AuthConfig
 }
 
 func (lcs loginCredentialStore) Basic(*url.URL) (string, string) {
@@ -37,12 +35,12 @@ func (lcs loginCredentialStore) SetRefreshToken(u *url.URL, service, token strin
 }
 
 type staticCredentialStore struct {
-	auth *types.AuthConfig
+	auth *registry.AuthConfig
 }
 
 // NewStaticCredentialStore returns a credential store
 // which always returns the same credential values.
-func NewStaticCredentialStore(auth *types.AuthConfig) auth.CredentialStore {
+func NewStaticCredentialStore(auth *registry.AuthConfig) auth.CredentialStore {
 	return staticCredentialStore{
 		auth: auth,
 	}
@@ -65,34 +63,26 @@ func (scs staticCredentialStore) RefreshToken(*url.URL, string) string {
 func (scs staticCredentialStore) SetRefreshToken(*url.URL, string, string) {
 }
 
-type fallbackError struct {
-	err error
-}
-
-func (err fallbackError) Error() string {
-	return err.err.Error()
-}
-
 // loginV2 tries to login to the v2 registry server. The given registry
 // endpoint will be pinged to get authorization challenges. These challenges
 // will be used to authenticate against the registry to validate credentials.
-func loginV2(authConfig *types.AuthConfig, endpoint APIEndpoint, userAgent string) (string, string, error) {
-	var (
-		endpointStr          = strings.TrimRight(endpoint.URL.String(), "/") + "/v2/"
-		modifiers            = Headers(userAgent, nil)
-		authTransport        = transport.NewTransport(NewTransport(endpoint.TLSConfig), modifiers...)
-		credentialAuthConfig = *authConfig
-		creds                = loginCredentialStore{authConfig: &credentialAuthConfig}
-	)
+func loginV2(authConfig *registry.AuthConfig, endpoint APIEndpoint, userAgent string) (status string, token string, _ error) {
+	endpointStr := strings.TrimRight(endpoint.URL.String(), "/") + "/v2/"
+	log.G(context.TODO()).Debugf("attempting v2 login to registry endpoint %s", endpointStr)
 
-	logrus.Debugf("attempting v2 login to registry endpoint %s", endpointStr)
-
-	loginClient, err := v2AuthHTTPClient(endpoint.URL, authTransport, modifiers, creds, nil)
+	req, err := http.NewRequest(http.MethodGet, endpointStr, nil)
 	if err != nil {
 		return "", "", err
 	}
 
-	req, err := http.NewRequest(http.MethodGet, endpointStr, nil)
+	var (
+		modifiers            = Headers(userAgent, nil)
+		authTrans            = transport.NewTransport(newTransport(endpoint.TLSConfig), modifiers...)
+		credentialAuthConfig = *authConfig
+		creds                = loginCredentialStore{authConfig: &credentialAuthConfig}
+	)
+
+	loginClient, err := v2AuthHTTPClient(endpoint.URL, authTrans, modifiers, creds, nil)
 	if err != nil {
 		return "", "", err
 	}
@@ -109,8 +99,7 @@ func loginV2(authConfig *types.AuthConfig, endpoint APIEndpoint, userAgent strin
 	}
 
 	// TODO(dmcgowan): Attempt to further interpret result, status code and error code string
-	err = errors.Errorf("login attempt to %s failed with status: %d %s", endpointStr, resp.StatusCode, http.StatusText(resp.StatusCode))
-	return "", "", err
+	return "", "", errors.Errorf("login attempt to %s failed with status: %d %s", endpointStr, resp.StatusCode, http.StatusText(resp.StatusCode))
 }
 
 func v2AuthHTTPClient(endpoint *url.URL, authTransport http.RoundTripper, modifiers []transport.RequestModifier, creds auth.CredentialStore, scopes []auth.Scope) (*http.Client, error) {
@@ -119,41 +108,42 @@ func v2AuthHTTPClient(endpoint *url.URL, authTransport http.RoundTripper, modifi
 		return nil, err
 	}
 
-	tokenHandlerOptions := auth.TokenHandlerOptions{
-		Transport:     authTransport,
-		Credentials:   creds,
-		OfflineAccess: true,
-		ClientID:      AuthClientID,
-		Scopes:        scopes,
+	authHandlers := []auth.AuthenticationHandler{
+		auth.NewTokenHandlerWithOptions(auth.TokenHandlerOptions{
+			Transport:     authTransport,
+			Credentials:   creds,
+			OfflineAccess: true,
+			ClientID:      AuthClientID,
+			Scopes:        scopes,
+		}),
+		auth.NewBasicHandler(creds),
 	}
-	tokenHandler := auth.NewTokenHandlerWithOptions(tokenHandlerOptions)
-	basicHandler := auth.NewBasicHandler(creds)
-	modifiers = append(modifiers, auth.NewAuthorizer(challengeManager, tokenHandler, basicHandler))
-	tr := transport.NewTransport(authTransport, modifiers...)
+
+	modifiers = append(modifiers, auth.NewAuthorizer(challengeManager, authHandlers...))
 
 	return &http.Client{
-		Transport: tr,
+		Transport: transport.NewTransport(authTransport, modifiers...),
 		Timeout:   15 * time.Second,
 	}, nil
 }
 
-// ConvertToHostname converts a registry url which has http|https prepended
-// to just an hostname.
+// ConvertToHostname normalizes a registry URL which has http|https prepended
+// to just its hostname. It is used to match credentials, which may be either
+// stored as hostname or as hostname including scheme (in legacy configuration
+// files).
 func ConvertToHostname(url string) string {
 	stripped := url
-	if strings.HasPrefix(url, "http://") {
-		stripped = strings.TrimPrefix(url, "http://")
-	} else if strings.HasPrefix(url, "https://") {
-		stripped = strings.TrimPrefix(url, "https://")
+	if strings.HasPrefix(stripped, "http://") {
+		stripped = strings.TrimPrefix(stripped, "http://")
+	} else if strings.HasPrefix(stripped, "https://") {
+		stripped = strings.TrimPrefix(stripped, "https://")
 	}
-
-	nameParts := strings.SplitN(stripped, "/", 2)
-
-	return nameParts[0]
+	stripped, _, _ = strings.Cut(stripped, "/")
+	return stripped
 }
 
 // ResolveAuthConfig matches an auth configuration to a server address or a URL
-func ResolveAuthConfig(authConfigs map[string]types.AuthConfig, index *registrytypes.IndexInfo) types.AuthConfig {
+func ResolveAuthConfig(authConfigs map[string]registry.AuthConfig, index *registry.IndexInfo) registry.AuthConfig {
 	configKey := GetAuthConfigKey(index)
 	// First try the happy case
 	if c, found := authConfigs[configKey]; found || index.Official {
@@ -162,14 +152,14 @@ func ResolveAuthConfig(authConfigs map[string]types.AuthConfig, index *registryt
 
 	// Maybe they have a legacy config file, we will iterate the keys converting
 	// them to the new format and testing
-	for registry, ac := range authConfigs {
-		if configKey == ConvertToHostname(registry) {
+	for registryURL, ac := range authConfigs {
+		if configKey == ConvertToHostname(registryURL) {
 			return ac
 		}
 	}
 
 	// When all else fails, return an empty auth config
-	return types.AuthConfig{}
+	return registry.AuthConfig{}
 }
 
 // PingResponseError is used when the response from a ping

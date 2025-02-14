@@ -4,15 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 
-	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/errdefs"
-	"github.com/pkg/errors"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
 )
@@ -23,9 +23,7 @@ func TestVolumeInspectError(t *testing.T) {
 	}
 
 	_, err := client.VolumeInspect(context.Background(), "nothing")
-	if !errdefs.IsSystem(err) {
-		t.Fatalf("expected a Server Error, got %[1]T: %[1]v", err)
-	}
+	assert.Check(t, is.ErrorType(err, errdefs.IsSystem))
 }
 
 func TestVolumeInspectNotFound(t *testing.T) {
@@ -34,7 +32,7 @@ func TestVolumeInspectNotFound(t *testing.T) {
 	}
 
 	_, err := client.VolumeInspect(context.Background(), "unknown")
-	assert.Check(t, IsErrNotFound(err))
+	assert.Check(t, is.ErrorType(err, errdefs.IsNotFound))
 }
 
 func TestVolumeInspectWithEmptyID(t *testing.T) {
@@ -44,14 +42,17 @@ func TestVolumeInspectWithEmptyID(t *testing.T) {
 		}),
 	}
 	_, _, err := client.VolumeInspectWithRaw(context.Background(), "")
-	if !IsErrNotFound(err) {
-		t.Fatalf("Expected NotFoundError, got %v", err)
-	}
+	assert.Check(t, is.ErrorType(err, errdefs.IsInvalidParameter))
+	assert.Check(t, is.ErrorContains(err, "value is empty"))
+
+	_, _, err = client.VolumeInspectWithRaw(context.Background(), "    ")
+	assert.Check(t, is.ErrorType(err, errdefs.IsInvalidParameter))
+	assert.Check(t, is.ErrorContains(err, "value is empty"))
 }
 
 func TestVolumeInspect(t *testing.T) {
 	expectedURL := "/volumes/volume_id"
-	expected := types.Volume{
+	expected := volume.Volume{
 		Name:       "name",
 		Driver:     "driver",
 		Mountpoint: "mountpoint",
@@ -76,7 +77,7 @@ func TestVolumeInspect(t *testing.T) {
 		}),
 	}
 
-	volume, err := client.VolumeInspect(context.Background(), "volume_id")
+	vol, err := client.VolumeInspect(context.Background(), "volume_id")
 	assert.NilError(t, err)
-	assert.Check(t, is.DeepEqual(expected, volume))
+	assert.Check(t, is.DeepEqual(expected, vol))
 }

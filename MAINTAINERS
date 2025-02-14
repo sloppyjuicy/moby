@@ -24,15 +24,23 @@
 	# subsystem maintainers accountable. If ownership is unclear, they are the de facto owners.
 
 		people = [
+			"akerouanton",
 			"akihirosuda",
 			"anusha",
+			"austinvazquez",
 			"coolljt0725",
+			"corhere",
 			"cpuguy83",
+			"crazy-max",
 			"estesp",
 			"johnstep",
 			"justincormack",
 			"kolyshkin",
+			"laurazard",
 			"mhbauer",
+			"neersighted",
+			"robmry",
+			"rumpl",
 			"runcom",
 			"samuelkarp",
 			"stevvooe",
@@ -43,6 +51,7 @@
 			"unclejack",
 			"vdemeester",
 			"vieux",
+			"vvoland",
 			"yongtang"
 		]
 
@@ -61,13 +70,17 @@
 		people = [
 			"alexellis",
 			"andrewhsu",
+			"bsousaa",
+			"dmcgowan",
 			"fntlnz",
 			"gianarb",
 			"olljanat",
 			"programmerq",
 			"ripcurld",
+			"sam-thibault",
 			"samwhited",
-			"thajeztah"
+			"thajeztah",
+			"thompson-shaun",
 		]
 
 	[Org.Alumni]
@@ -273,6 +286,11 @@
 	Email = "aaron.lehmann@docker.com"
 	GitHub = "aaronlehmann"
 
+	[people.akerouanton]
+	Name = "Albin Kerouanton"
+	Email = "albinker@gmail.com"
+	GitHub = "akerouanton"
+
 	[people.alexellis]
 	Name = "Alex Ellis"
 	Email = "alexellis2@gmail.com"
@@ -298,10 +316,20 @@
 	Email = "andrewhsu@docker.com"
 	GitHub = "andrewhsu"
 
+	[people.austinvazquez]
+	Name = "Austin Vazquez"
+	Email = "macedonv@amazon.com"
+	GitHub = "austinvazquez"
+
 	[people.anusha]
 	Name = "Anusha Ragunathan"
 	Email = "anusha@docker.com"
 	GitHub = "anusha-ragunathan"
+	
+	[people.bsousaa]
+	Name = "Bruno de Sousa"
+	Email = "bruno.sousa@docker.com"
+	GitHub = "bsousaa"
 
 	[people.calavera]
 	Name = "David Calavera"
@@ -313,10 +341,20 @@
 	Email = "leijitang@huawei.com"
 	GitHub = "coolljt0725"
 
+	[people.corhere]
+	Name = "Cory Snider"
+	Email = "csnider@mirantis.com"
+	GitHub = "corhere"
+
 	[people.cpuguy83]
 	Name = "Brian Goff"
 	Email = "cpuguy83@gmail.com"
 	GitHub = "cpuguy83"
+
+	[people.crazy-max]
+	Name = "Kevin Alvarez"
+	Email = "contact@crazymax.dev"
+	GitHub = "crazy-max"
 
 	[people.crosbymichael]
 	Name = "Michael Crosby"
@@ -327,6 +365,11 @@
 	Name = "Daniel Nephin"
 	Email = "dnephin@gmail.com"
 	GitHub = "dnephin"
+
+	[people.dmcgowan]
+	Name = "Derek McGowan"
+	Email = "derek@mcgstyle.net"
+	GitHub = "dmcgowan"
 
 	[people.duglin]
 	Name = "Doug Davis"
@@ -388,6 +431,11 @@
 	Email = "kolyshkin@gmail.com"
 	GitHub = "kolyshkin"
 
+	[people.laurazard]
+	Name = "Laura Brehm"
+	Email = "laurabrehm@hey.com"
+	GitHub = "laurazard"
+
 	[people.lk4d4]
 	Name = "Alexander Morozov"
 	Email = "lk4d4@docker.com"
@@ -423,6 +471,11 @@
 	Email = "mrjana@docker.com"
 	GitHub = "mrjana"
 
+	[people.neersighted]
+	Name = "Bjorn Neergaard"
+	Email = "bjorn@neersighted.com"
+	GitHub = "neersighted"
+
 	[people.olljanat]
 	Name = "Olli Janatuinen"
 	Email = "olli.janatuinen@gmail.com"
@@ -433,19 +486,34 @@
 	Email = "jeff@docker.com"
 	GitHub = "programmerq"
 
+	[people.robmry]
+	Name = "Rob Murray"
+	Email = "rob.murray@docker.com"
+	GitHub = "robmry"
+
 	[people.ripcurld]
 	Name = "Boaz Shuster"
 	Email = "ripcurld.github@gmail.com"
 	GitHub = "ripcurld"
+
+	[people.rumpl]
+	Name = "Djordje Lukic"
+	Email = "djordje.lukic@docker.com"
+	GitHub = "rumpl"
 
 	[people.runcom]
 	Name = "Antonio Murdaca"
 	Email = "runcom@redhat.com"
 	GitHub = "runcom"
 
+	[people.sam-thibault]
+	Name = "Sam Thibault"
+	Email = "sam.thibault@docker.com"
+	GitHub = "sam-thibault"
+
 	[people.samuelkarp]
 	Name = "Samuel Karp"
-	Email = "skarp@amazon.com"
+	Email = "me@samuelkarp.com"
 	GitHub = "samuelkarp"
 
 	[people.samwhited]
@@ -472,6 +540,11 @@
 	Name = "Sebastiaan van Stijn"
 	Email = "github@gone.nl"
 	GitHub = "thaJeztah"
+
+	[people.thompson-shaun]
+	Name = "Shaun Thompson"
+	Email = "shaun.thompson@docker.com"
+	GitHub = "thompson-shaun"
 
 	[people.tianon]
 	Name = "Tianon Gravi"
@@ -512,6 +585,11 @@
 	Name = "Vishnu Kannan"
 	Email = "vishnuk@google.com"
 	GitHub = "vishh"
+	
+	[people.vvoland]
+	Name = "Paweł Gronowski"
+	Email = "pawel.gronowski@docker.com"
+	GitHub = "vvoland"
 
 	[people.yongtang]
 	Name = "Yong Tang"

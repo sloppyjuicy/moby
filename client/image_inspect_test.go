@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,9 +12,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/errdefs"
-	"github.com/pkg/errors"
+	"gotest.tools/v3/assert"
+	is "gotest.tools/v3/assert/cmp"
 )
 
 func TestImageInspectError(t *testing.T) {
@@ -21,10 +23,8 @@ func TestImageInspectError(t *testing.T) {
 		client: newMockClient(errorMock(http.StatusInternalServerError, "Server error")),
 	}
 
-	_, _, err := client.ImageInspectWithRaw(context.Background(), "nothing")
-	if !errdefs.IsSystem(err) {
-		t.Fatalf("expected a Server Error, got %[1]T: %[1]v", err)
-	}
+	_, err := client.ImageInspect(context.Background(), "nothing")
+	assert.Check(t, is.ErrorType(err, errdefs.IsSystem))
 }
 
 func TestImageInspectImageNotFound(t *testing.T) {
@@ -32,10 +32,8 @@ func TestImageInspectImageNotFound(t *testing.T) {
 		client: newMockClient(errorMock(http.StatusNotFound, "Server error")),
 	}
 
-	_, _, err := client.ImageInspectWithRaw(context.Background(), "unknown")
-	if err == nil || !IsErrNotFound(err) {
-		t.Fatalf("expected an imageNotFound error, got %v", err)
-	}
+	_, err := client.ImageInspect(context.Background(), "unknown")
+	assert.Check(t, is.ErrorType(err, errdefs.IsNotFound))
 }
 
 func TestImageInspectWithEmptyID(t *testing.T) {
@@ -44,10 +42,8 @@ func TestImageInspectWithEmptyID(t *testing.T) {
 			return nil, errors.New("should not make request")
 		}),
 	}
-	_, _, err := client.ImageInspectWithRaw(context.Background(), "")
-	if !IsErrNotFound(err) {
-		t.Fatalf("Expected NotFoundError, got %v", err)
-	}
+	_, err := client.ImageInspect(context.Background(), "")
+	assert.Check(t, is.ErrorType(err, errdefs.IsNotFound))
 }
 
 func TestImageInspect(t *testing.T) {
@@ -58,7 +54,7 @@ func TestImageInspect(t *testing.T) {
 			if !strings.HasPrefix(req.URL.Path, expectedURL) {
 				return nil, fmt.Errorf("Expected URL '%s', got '%s'", expectedURL, req.URL)
 			}
-			content, err := json.Marshal(types.ImageInspect{
+			content, err := json.Marshal(image.InspectResponse{
 				ID:       "image_id",
 				RepoTags: expectedTags,
 			})
@@ -72,7 +68,7 @@ func TestImageInspect(t *testing.T) {
 		}),
 	}
 
-	imageInspect, _, err := client.ImageInspectWithRaw(context.Background(), "image_id")
+	imageInspect, err := client.ImageInspect(context.Background(), "image_id")
 	if err != nil {
 		t.Fatal(err)
 	}

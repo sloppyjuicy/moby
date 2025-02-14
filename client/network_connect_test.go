@@ -10,9 +10,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/errdefs"
+	"gotest.tools/v3/assert"
+	is "gotest.tools/v3/assert/cmp"
 )
 
 func TestNetworkConnectError(t *testing.T) {
@@ -21,9 +22,16 @@ func TestNetworkConnectError(t *testing.T) {
 	}
 
 	err := client.NetworkConnect(context.Background(), "network_id", "container_id", nil)
-	if !errdefs.IsSystem(err) {
-		t.Fatalf("expected a Server Error, got %[1]T: %[1]v", err)
-	}
+	assert.Check(t, is.ErrorType(err, errdefs.IsSystem))
+
+	// Empty network ID or container ID
+	err = client.NetworkConnect(context.Background(), "", "container_id", nil)
+	assert.Check(t, is.ErrorType(err, errdefs.IsInvalidParameter))
+	assert.Check(t, is.ErrorContains(err, "value is empty"))
+
+	err = client.NetworkConnect(context.Background(), "network_id", "", nil)
+	assert.Check(t, is.ErrorType(err, errdefs.IsInvalidParameter))
+	assert.Check(t, is.ErrorContains(err, "value is empty"))
 }
 
 func TestNetworkConnectEmptyNilEndpointSettings(t *testing.T) {
@@ -39,7 +47,7 @@ func TestNetworkConnectEmptyNilEndpointSettings(t *testing.T) {
 				return nil, fmt.Errorf("expected POST method, got %s", req.Method)
 			}
 
-			var connect types.NetworkConnect
+			var connect network.ConnectOptions
 			if err := json.NewDecoder(req.Body).Decode(&connect); err != nil {
 				return nil, err
 			}
@@ -78,7 +86,7 @@ func TestNetworkConnect(t *testing.T) {
 				return nil, fmt.Errorf("expected POST method, got %s", req.Method)
 			}
 
-			var connect types.NetworkConnect
+			var connect network.ConnectOptions
 			if err := json.NewDecoder(req.Body).Decode(&connect); err != nil {
 				return nil, err
 			}

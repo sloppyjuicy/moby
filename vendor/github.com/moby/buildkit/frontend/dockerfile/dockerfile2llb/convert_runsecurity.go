@@ -1,4 +1,4 @@
-// +build dfrunsecurity
+//go:build dfrunsecurity
 
 package dockerfile2llb
 

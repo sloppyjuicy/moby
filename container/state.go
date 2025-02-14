@@ -7,14 +7,19 @@ import (
 	"sync"
 	"time"
 
-	"github.com/docker/docker/api/types"
-	units "github.com/docker/go-units"
+	"github.com/docker/docker/api/types/container"
+	libcontainerdtypes "github.com/docker/docker/libcontainerd/types"
+	"github.com/docker/go-units"
 )
 
 // State holds the current container state, and has methods to get and
-// set the state. Container has an embed, which allows all of the
-// functions defined against State to run against Container.
+// set the state. State is embedded in the [Container] struct.
+//
+// State contains an exported [sync.Mutex] which is used as a global lock
+// for both the State and the Container it's embedded in.
 type State struct {
+	// This Mutex is exported by design and is used as a global lock
+	// for both the State and the Container it's embedded in.
 	sync.Mutex
 	// Note that `Running` and `Paused` are not mutually exclusive:
 	// When pausing a container (on Linux), the freezer cgroup is used to suspend
@@ -32,9 +37,18 @@ type State struct {
 	StartedAt         time.Time
 	FinishedAt        time.Time
 	Health            *Health
+	Removed           bool `json:"-"`
 
-	waitStop   chan struct{}
-	waitRemove chan struct{}
+	stopWaiters       []chan<- StateStatus
+	removeOnlyWaiters []chan<- StateStatus
+
+	// The libcontainerd reference fields are unexported to force consumers
+	// to access them through the getter methods with multi-valued returns
+	// so that they can't forget to nil-check: the code won't compile unless
+	// the nil-check result is explicitly consumed or discarded.
+
+	ctr  libcontainerdtypes.Container
+	task libcontainerdtypes.Task
 }
 
 // StateStatus is used to return container wait results.
@@ -57,12 +71,9 @@ func (s StateStatus) Err() error {
 	return s.err
 }
 
-// NewState creates a default state object with a fresh channel for state changes.
+// NewState creates a default state object.
 func NewState() *State {
-	return &State{
-		waitStop:   make(chan struct{}),
-		waitRemove: make(chan struct{}),
-	}
+	return &State{}
 }
 
 // String returns a human-readable description of the state
@@ -103,10 +114,10 @@ func (s *State) String() string {
 
 // IsValidHealthString checks if the provided string is a valid container health status or not.
 func IsValidHealthString(s string) bool {
-	return s == types.Starting ||
-		s == types.Healthy ||
-		s == types.Unhealthy ||
-		s == types.NoHealthcheck
+	return s == container.Starting ||
+		s == container.Healthy ||
+		s == container.Unhealthy ||
+		s == container.NoHealthcheck
 }
 
 // StateString returns a single string to describe state
@@ -182,11 +193,10 @@ func (s *State) Wait(ctx context.Context, condition WaitCondition) <-chan StateS
 	s.Lock()
 	defer s.Unlock()
 
-	if condition == WaitConditionNotRunning && !s.Running {
-		// Buffer so we can put it in the channel now.
-		resultC := make(chan StateStatus, 1)
+	// Buffer so we can put status and finish even nobody receives it.
+	resultC := make(chan StateStatus, 1)
 
-		// Send the current status.
+	if s.conditionAlreadyMet(condition) {
 		resultC <- StateStatus{
 			exitCode: s.ExitCode(),
 			err:      s.Err(),
@@ -195,19 +205,16 @@ func (s *State) Wait(ctx context.Context, condition WaitCondition) <-chan StateS
 		return resultC
 	}
 
-	// If we are waiting only for removal, the waitStop channel should
-	// remain nil and block forever.
-	var waitStop chan struct{}
-	if condition < WaitConditionRemoved {
-		waitStop = s.waitStop
+	waitC := make(chan StateStatus, 1)
+
+	// Removal wakes up both removeOnlyWaiters and stopWaiters
+	// Container could be removed while still in "created" state
+	// in which case it is never actually stopped
+	if condition == WaitConditionRemoved {
+		s.removeOnlyWaiters = append(s.removeOnlyWaiters, waitC)
+	} else {
+		s.stopWaiters = append(s.stopWaiters, waitC)
 	}
-
-	// Always wait for removal, just in case the container gets removed
-	// while it is still in a "created" state, in which case it is never
-	// actually stopped.
-	waitRemove := s.waitRemove
-
-	resultC := make(chan StateStatus, 1)
 
 	go func() {
 		select {
@@ -218,21 +225,24 @@ func (s *State) Wait(ctx context.Context, condition WaitCondition) <-chan StateS
 				err:      ctx.Err(),
 			}
 			return
-		case <-waitStop:
-		case <-waitRemove:
+		case status := <-waitC:
+			resultC <- status
 		}
-
-		s.Lock()
-		result := StateStatus{
-			exitCode: s.ExitCode(),
-			err:      s.Err(),
-		}
-		s.Unlock()
-
-		resultC <- result
 	}()
 
 	return resultC
+}
+
+func (s *State) conditionAlreadyMet(condition WaitCondition) bool {
+	switch condition {
+	case WaitConditionNotRunning:
+		return !s.Running
+	case WaitConditionRemoved:
+		return s.Removed
+	default:
+		// TODO(thaJeztah): how do we want to handle "WaitConditionNextExit"?
+		return false
+	}
 }
 
 // IsRunning returns whether the running flag is set. Used by Container to check whether a container is running.
@@ -263,19 +273,36 @@ func (s *State) SetExitCode(ec int) {
 	s.ExitCodeValue = ec
 }
 
-// SetRunning sets the state of the container to "running".
-func (s *State) SetRunning(pid int, initial bool) {
+// SetRunning sets the running state along with StartedAt time.
+func (s *State) SetRunning(ctr libcontainerdtypes.Container, tsk libcontainerdtypes.Task, start time.Time) {
+	s.setRunning(ctr, tsk, &start)
+}
+
+// SetRunningExternal sets the running state without setting the `StartedAt` time (used for containers not started by Docker instead of SetRunning).
+func (s *State) SetRunningExternal(ctr libcontainerdtypes.Container, tsk libcontainerdtypes.Task) {
+	s.setRunning(ctr, tsk, nil)
+}
+
+// setRunning sets the state of the container to "running".
+func (s *State) setRunning(ctr libcontainerdtypes.Container, tsk libcontainerdtypes.Task, start *time.Time) {
 	s.ErrorMsg = ""
 	s.Paused = false
 	s.Running = true
 	s.Restarting = false
-	if initial {
+	if start != nil {
 		s.Paused = false
 	}
 	s.ExitCodeValue = 0
-	s.Pid = pid
-	if initial {
-		s.StartedAt = time.Now().UTC()
+	s.ctr = ctr
+	s.task = tsk
+	if tsk != nil {
+		s.Pid = int(tsk.Pid())
+	} else {
+		s.Pid = 0
+	}
+	s.OOMKilled = false
+	if start != nil {
+		s.StartedAt = start.UTC()
 	}
 }
 
@@ -291,9 +318,8 @@ func (s *State) SetStopped(exitStatus *ExitStatus) {
 		s.FinishedAt = exitStatus.ExitedAt
 	}
 	s.ExitCodeValue = exitStatus.ExitCode
-	s.OOMKilled = exitStatus.OOMKilled
-	close(s.waitStop) // fire waiters for stop
-	s.waitStop = make(chan struct{})
+
+	s.notifyAndClear(&s.stopWaiters)
 }
 
 // SetRestarting sets the container state to "restarting" without locking.
@@ -307,9 +333,8 @@ func (s *State) SetRestarting(exitStatus *ExitStatus) {
 	s.Pid = 0
 	s.FinishedAt = time.Now().UTC()
 	s.ExitCodeValue = exitStatus.ExitCode
-	s.OOMKilled = exitStatus.OOMKilled
-	close(s.waitStop) // fire waiters for stop
-	s.waitStop = make(chan struct{})
+
+	s.notifyAndClear(&s.stopWaiters)
 }
 
 // SetError sets the container's error state. This is useful when we want to
@@ -374,22 +399,19 @@ func (s *State) IsDead() bool {
 	return res
 }
 
-// SetRemoved assumes this container is already in the "dead" state and
-// closes the internal waitRemove channel to unblock callers waiting for a
-// container to be removed.
+// SetRemoved assumes this container is already in the "dead" state and notifies all waiters.
 func (s *State) SetRemoved() {
 	s.SetRemovalError(nil)
 }
 
 // SetRemovalError is to be called in case a container remove failed.
-// It sets an error and closes the internal waitRemove channel to unblock
-// callers waiting for the container to be removed.
+// It sets an error and notifies all waiters.
 func (s *State) SetRemovalError(err error) {
 	s.SetError(err)
 	s.Lock()
-	close(s.waitRemove) // Unblock those waiting on remove.
-	// Recreate the channel so next ContainerWait will work
-	s.waitRemove = make(chan struct{})
+	s.Removed = true
+	s.notifyAndClear(&s.removeOnlyWaiters)
+	s.notifyAndClear(&s.stopWaiters)
 	s.Unlock()
 }
 
@@ -399,4 +421,34 @@ func (s *State) Err() error {
 		return errors.New(s.ErrorMsg)
 	}
 	return nil
+}
+
+func (s *State) notifyAndClear(waiters *[]chan<- StateStatus) {
+	result := StateStatus{
+		exitCode: s.ExitCodeValue,
+		err:      s.Err(),
+	}
+
+	for _, c := range *waiters {
+		c <- result
+	}
+	*waiters = nil
+}
+
+// C8dContainer returns a reference to the libcontainerd Container object for
+// the container and whether the reference is valid.
+//
+// The container lock must be held when calling this method.
+func (s *State) C8dContainer() (_ libcontainerdtypes.Container, ok bool) {
+	return s.ctr, s.ctr != nil
+}
+
+// Task returns a reference to the libcontainerd Task object for the container
+// and whether the reference is valid.
+//
+// The container lock must be held when calling this method.
+//
+// See also: (*Container).GetRunningTask().
+func (s *State) Task() (_ libcontainerdtypes.Task, ok bool) {
+	return s.task, s.task != nil
 }

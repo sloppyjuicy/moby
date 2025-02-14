@@ -7,8 +7,9 @@ import (
 	"os"
 	"time"
 
+	"github.com/moby/buildkit/util/bklog"
+
 	"github.com/pkg/errors"
-	"github.com/sirupsen/logrus"
 	"github.com/tonistiigi/fsutil"
 	fstypes "github.com/tonistiigi/fsutil/types"
 	"google.golang.org/grpc"
@@ -18,10 +19,6 @@ type Stream interface {
 	Context() context.Context
 	SendMsg(m interface{}) error
 	RecvMsg(m interface{}) error
-}
-
-func sendDiffCopy(stream Stream, fs fsutil.FS, progress progressCb) error {
-	return errors.WithStack(fsutil.Send(stream.Context(), stream, fs, progress))
 }
 
 func newStreamWriter(stream grpc.ClientStream) io.WriteCloser {
@@ -46,6 +43,22 @@ type streamWriterCloser struct {
 }
 
 func (wc *streamWriterCloser) Write(dt []byte) (int, error) {
+	// grpc-go has a 4MB limit on messages by default. Split large messages
+	// so we don't get close to that limit.
+	const maxChunkSize = 3 * 1024 * 1024
+	if len(dt) > maxChunkSize {
+		n1, err := wc.Write(dt[:maxChunkSize])
+		if err != nil {
+			return n1, err
+		}
+		dt = dt[maxChunkSize:]
+		var n2 int
+		if n2, err = wc.Write(dt); err != nil {
+			return n1 + n2, err
+		}
+		return n1 + n2, nil
+	}
+
 	if err := wc.ClientStream.SendMsg(&BytesMessage{Data: dt}); err != nil {
 		// SendMsg return EOF on remote errors
 		if errors.Is(err, io.EOF) {
@@ -70,10 +83,10 @@ func (wc *streamWriterCloser) Close() error {
 	return nil
 }
 
-func recvDiffCopy(ds grpc.ClientStream, dest string, cu CacheUpdater, progress progressCb, filter func(string, *fstypes.Stat) bool) (err error) {
+func recvDiffCopy(ds grpc.ClientStream, dest string, cu CacheUpdater, progress progressCb, differ fsutil.DiffType, filter func(string, *fstypes.Stat) bool) (err error) {
 	st := time.Now()
 	defer func() {
-		logrus.Debugf("diffcopy took: %v", time.Since(st))
+		bklog.G(ds.Context()).Debugf("diffcopy took: %v", time.Since(st))
 	}()
 	var cf fsutil.ChangeFunc
 	var ch fsutil.ContentHasher
@@ -93,6 +106,7 @@ func recvDiffCopy(ds grpc.ClientStream, dest string, cu CacheUpdater, progress p
 		ContentHasher: ch,
 		ProgressCb:    progress,
 		Filter:        fsutil.FilterFunc(filter),
+		Differ:        differ,
 	}))
 }
 
@@ -115,8 +129,9 @@ func syncTargetDiffCopy(ds grpc.ServerStream, dest string) error {
 }
 
 func writeTargetFile(ds grpc.ServerStream, wc io.WriteCloser) error {
+	var bm BytesMessage
 	for {
-		bm := BytesMessage{}
+		bm.Data = bm.Data[:0]
 		if err := ds.RecvMsg(&bm); err != nil {
 			if errors.Is(err, io.EOF) {
 				return nil

@@ -4,10 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"path"
-	"regexp"
 	"strings"
 
 	"github.com/docker/docker/api/types/mount"
+	"github.com/docker/docker/internal/lazyregexp"
 )
 
 // NewLCOWParser creates a parser with Linux Containers on Windows semantics.
@@ -22,14 +22,14 @@ func NewLCOWParser() Parser {
 // rxLCOWDestination is the regex expression for the mount destination for LCOW
 //
 // Destination (aka container path):
-//    -  Variation on hostdir but can be a drive followed by colon as well
-//    -  If a path, must be absolute. Can include spaces
-//    -  Drive cannot be c: (explicitly checked in code, not RegEx)
+//   - Variation on hostdir but can be a drive followed by colon as well
+//   - If a path, must be absolute. Can include spaces
+//   - Drive cannot be c: (explicitly checked in code, not RegEx)
 const rxLCOWDestination = `(?P<destination>/(?:[^\\/:*?"<>\r\n]+[/]?)*)`
 
 var (
-	lcowMountDestinationRegex = regexp.MustCompile(`^` + rxLCOWDestination + `$`)
-	lcowSplitRawSpec          = regexp.MustCompile(`^` + rxSource + rxLCOWDestination + rxMode + `$`)
+	lcowMountDestinationRegex = lazyregexp.New(`^` + rxLCOWDestination + `$`)
+	lcowSplitRawSpec          = lazyregexp.New(`^` + rxSource + rxLCOWDestination + rxMode + `$`)
 )
 
 var lcowValidators mountValidator = func(m *mount.Mount) error {

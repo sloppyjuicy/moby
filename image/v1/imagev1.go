@@ -1,22 +1,26 @@
 package v1 // import "github.com/docker/docker/image/v1"
 
 import (
+	"context"
 	"encoding/json"
-	"reflect"
+	"errors"
 	"strings"
 
+	"github.com/containerd/log"
 	"github.com/docker/docker/api/types/versions"
 	"github.com/docker/docker/image"
 	"github.com/docker/docker/layer"
-	"github.com/docker/docker/pkg/stringid"
 	"github.com/opencontainers/go-digest"
-	"github.com/sirupsen/logrus"
 )
 
-// noFallbackMinVersion is the minimum version for which v1compatibility
-// information will not be marshaled through the Image struct to remove
-// blank fields.
-var noFallbackMinVersion = "1.8.3"
+const (
+	// noFallbackMinVersion is the minimum version for which v1compatibility
+	// information will not be marshaled through the Image struct to remove
+	// blank fields.
+	noFallbackMinVersion = "1.8.3"
+
+	fullLen = 64
+)
 
 // HistoryFromConfig creates a History struct from v1 configuration JSON
 func HistoryFromConfig(imageJSON []byte, emptyLayer bool) (image.History, error) {
@@ -59,7 +63,7 @@ func CreateID(v1Image image.V1Image, layerID layer.ChainID, parent digest.Digest
 	if err != nil {
 		return "", err
 	}
-	logrus.Debugf("CreateV1ID %s", configJSON)
+	log.G(context.TODO()).Debugf("CreateV1ID %s", configJSON)
 
 	return digest.FromBytes(configJSON), nil
 }
@@ -106,36 +110,6 @@ func MakeConfigFromV1Config(imageJSON []byte, rootfs *image.RootFS, history []im
 	return json.Marshal(c)
 }
 
-// MakeV1ConfigFromConfig creates a legacy V1 image config from an Image struct
-func MakeV1ConfigFromConfig(img *image.Image, v1ID, parentV1ID string, throwaway bool) ([]byte, error) {
-	// Top-level v1compatibility string should be a modified version of the
-	// image config.
-	var configAsMap map[string]*json.RawMessage
-	if err := json.Unmarshal(img.RawJSON(), &configAsMap); err != nil {
-		return nil, err
-	}
-
-	// Delete fields that didn't exist in old manifest
-	imageType := reflect.TypeOf(img).Elem()
-	for i := 0; i < imageType.NumField(); i++ {
-		f := imageType.Field(i)
-		jsonName := strings.Split(f.Tag.Get("json"), ",")[0]
-		// Parent is handled specially below.
-		if jsonName != "" && jsonName != "parent" {
-			delete(configAsMap, jsonName)
-		}
-	}
-	configAsMap["id"] = rawJSON(v1ID)
-	if parentV1ID != "" {
-		configAsMap["parent"] = rawJSON(parentV1ID)
-	}
-	if throwaway {
-		configAsMap["throwaway"] = rawJSON(true)
-	}
-
-	return json.Marshal(configAsMap)
-}
-
 func rawJSON(value interface{}) *json.RawMessage {
 	jsonval, err := json.Marshal(value)
 	if err != nil {
@@ -146,5 +120,13 @@ func rawJSON(value interface{}) *json.RawMessage {
 
 // ValidateID checks whether an ID string is a valid image ID.
 func ValidateID(id string) error {
-	return stringid.ValidateID(id)
+	if len(id) != fullLen {
+		return errors.New("image ID '" + id + "' is invalid")
+	}
+	for _, c := range id {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return errors.New("image ID '" + id + "' is invalid")
+		}
+	}
+	return nil
 }

@@ -24,7 +24,7 @@ info:
   title: "Docker Engine API"
   version: "1.38"
   x-logo:
-    url: "https://docs.docker.com/images/logo-docker-main.png"
+    url: "https://docs.docker.com/assets/images/logo-docker-main.png"
   description: |
     The Engine API is an HTTP API served by Docker Engine. It is the API the Docker client uses to communicate with the Engine, so everything the Docker client can do can be done with the API.
 
@@ -820,6 +820,7 @@ definitions:
               - "default"
               - "process"
               - "hyperv"
+              - ""
           MaskedPaths:
             type: "array"
             description: "The list of paths to be masked inside the container (this overrides the default set of paths)"
@@ -832,7 +833,15 @@ definitions:
               type: "string"
 
   ContainerConfig:
-    description: "Configuration for a container that is portable between hosts"
+    description: |
+      Configuration for a container that is portable between hosts.
+
+      When used as `ContainerConfig` field in an image, `ContainerConfig` is an
+      optional field containing the configuration of the container that was last
+      committed when creating the image.
+
+      Previous versions of Docker builder used this field to store build cache,
+      and it is not in active use anymore.
     type: "object"
     properties:
       Hostname:
@@ -2186,8 +2195,6 @@ definitions:
           - Type: "Log"
             Name: "json-file"
           - Type: "Log"
-            Name: "logentries"
-          - Type: "Log"
             Name: "splunk"
           - Type: "Log"
             Name: "syslog"
@@ -2434,7 +2441,7 @@ definitions:
                 example: "json-file"
               Options:
                 description: |
-                  Driver-specific options for the selectd log driver, specified
+                  Driver-specific options for the selected log driver, specified
                   as key/value pairs.
                 type: "object"
                 additionalProperties:
@@ -2767,6 +2774,7 @@ definitions:
               - "default"
               - "process"
               - "hyperv"
+              - ""
           Init:
             description: "Run an init inside the container that forwards signals and reaps processes. This field is omitted if empty, and the default (as configured on the daemon) is used."
             type: "boolean"
@@ -2794,7 +2802,7 @@ definitions:
           Limits:
             description: "Define resources limits."
             $ref: "#/definitions/ResourceObject"
-          Reservation:
+          Reservations:
             description: "Define resources reservation."
             $ref: "#/definitions/ResourceObject"
       RestartPolicy:
@@ -3033,6 +3041,7 @@ definitions:
 
   ServiceSpec:
     description: "User modifiable configuration for a service."
+    type: object
     properties:
       Name:
         description: "Name of the service."
@@ -3726,7 +3735,7 @@ definitions:
           Go runtime (`GOOS`).
 
           Currently returned values are "linux" and "windows". A full list of
-          possible values can be found in the [Go documentation](https://golang.org/doc/install/source#environment).
+          possible values can be found in the [Go documentation](https://go.dev/doc/install/source#environment).
         type: "string"
         example: "linux"
       Architecture:
@@ -3734,7 +3743,7 @@ definitions:
           Hardware architecture of the host, as returned by the Go runtime
           (`GOARCH`).
 
-          A full list of possible values can be found in the [Go documentation](https://golang.org/doc/install/source#environment).
+          A full list of possible values can be found in the [Go documentation](https://go.dev/doc/install/source#environment).
         type: "string"
         example: "x86_64"
       NCPU:
@@ -3816,10 +3825,6 @@ definitions:
       ServerVersion:
         description: |
           Version string of the daemon.
-
-          > **Note**: the [standalone Swarm API](https://docs.docker.com/swarm/swarm-api/)
-          > returns the Swarm version instead of the daemon  version, for example
-          > `swarm/1.2.8`.
         type: "string"
         example: "17.06.0-ce"
       ClusterStore:
@@ -3912,6 +3917,7 @@ definitions:
           - "default"
           - "hyperv"
           - "process"
+          - ""
       InitBinary:
         description: |
           Name and, optional, path of the `docker-init` binary.
@@ -3980,7 +3986,7 @@ definitions:
         type: "array"
         items:
           type: "string"
-        example: ["awslogs", "fluentd", "gcplogs", "gelf", "journald", "json-file", "logentries", "splunk", "syslog"]
+        example: ["awslogs", "fluentd", "gcplogs", "gelf", "journald", "json-file", "splunk", "syslog"]
 
 
   RegistryServiceConfig:
@@ -3994,55 +4000,27 @@ definitions:
           List of IP ranges to which nondistributable artifacts can be pushed,
           using the CIDR syntax [RFC 4632](https://tools.ietf.org/html/4632).
 
-          Some images (for example, Windows base images) contain artifacts
-          whose distribution is restricted by license. When these images are
-          pushed to a registry, restricted artifacts are not included.
+          <p><br /></p>
 
-          This configuration override this behavior, and enables the daemon to
-          push nondistributable artifacts to all registries whose resolved IP
-          address is within the subnet described by the CIDR syntax.
-
-          This option is useful when pushing images containing
-          nondistributable artifacts to a registry on an air-gapped network so
-          hosts on that network can pull the images without connecting to
-          another server.
-
-          > **Warning**: Nondistributable artifacts typically have restrictions
-          > on how and where they can be distributed and shared. Only use this
-          > feature to push artifacts to private registries and ensure that you
-          > are in compliance with any terms that cover redistributing
-          > nondistributable artifacts.
-
+          > **Deprecated**: Pushing nondistributable artifacts is now always enabled
+          > and this field is always `null`.
         type: "array"
         items:
           type: "string"
-        example: ["::1/128", "127.0.0.0/8"]
+        example: []
       AllowNondistributableArtifactsHostnames:
         description: |
           List of registry hostnames to which nondistributable artifacts can be
           pushed, using the format `<hostname>[:<port>]` or `<IP address>[:<port>]`.
 
-          Some images (for example, Windows base images) contain artifacts
-          whose distribution is restricted by license. When these images are
-          pushed to a registry, restricted artifacts are not included.
+          <p><br /></p>
 
-          This configuration override this behavior for the specified
-          registries.
-
-          This option is useful when pushing images containing
-          nondistributable artifacts to a registry on an air-gapped network so
-          hosts on that network can pull the images without connecting to
-          another server.
-
-          > **Warning**: Nondistributable artifacts typically have restrictions
-          > on how and where they can be distributed and shared. Only use this
-          > feature to push artifacts to private registries and ensure that you
-          > are in compliance with any terms that cover redistributing
-          > nondistributable artifacts.
+          > **Deprecated**: Pushing nondistributable artifacts is now always enabled
+          > and this field is always `null`.
         type: "array"
         items:
           type: "string"
-        example: ["registry.internal.corp.example.com:3000", "[2001:db8:a0b:12f0::1]:443"]
+        example: []
       InsecureRegistryCIDRs:
         description: |
           List of IP ranges of insecure registries, using the CIDR syntax
@@ -4265,6 +4243,7 @@ definitions:
 
   PeerNode:
     description: "Represents a peer-node in the swarm"
+    type: "object"
     properties:
       NodeID:
         description: "Unique identifier of for this node in the swarm."
@@ -4822,7 +4801,7 @@ paths:
                 StopSignal: "SIGTERM"
                 StopTimeout: 10
               Created: "2015-01-06T15:47:31.485331387Z"
-              Driver: "devicemapper"
+              Driver: "overlay2"
               ExecIDs:
                 - "b35395de42bc8abd327f9dd65d913b9ba28c74d2f0734eeeae84fa1c616a0fca"
                 - "3fc1232e5cd20c8de182ed81178503dc6437f4e7ef12b52cc5e8de020652f1c4"
@@ -5360,10 +5339,12 @@ paths:
           type: "string"
         - name: "h"
           in: "query"
+          required: true
           description: "Height of the tty session in characters"
           type: "integer"
         - name: "w"
           in: "query"
+          required: true
           description: "Width of the tty session in characters"
           type: "integer"
       tags: ["Container"]
@@ -5840,21 +5821,6 @@ paths:
           description: "Return stream"
           type: "boolean"
           default: false
-        - name: "stdin"
-          in: "query"
-          description: "Attach to `stdin`"
-          type: "boolean"
-          default: false
-        - name: "stdout"
-          in: "query"
-          description: "Attach to `stdout`"
-          type: "boolean"
-          default: false
-        - name: "stderr"
-          in: "query"
-          description: "Attach to `stderr`"
-          type: "boolean"
-          default: false
       tags: ["Container"]
   /containers/{id}/wait:
     post:
@@ -5982,14 +5948,7 @@ paths:
         400:
           description: "Bad parameter"
           schema:
-            allOf:
-              - $ref: "#/definitions/ErrorResponse"
-              - type: "object"
-                properties:
-                  message:
-                    description: "The error message. Either \"must specify path parameter\" (path cannot be empty) or \"not a directory\" (path was asserted to be a directory but exists as a file)."
-                    type: "string"
-                    x-nullable: false
+            $ref: "#/definitions/ErrorResponse"
         404:
           description: "Container or path does not exist"
           schema:
@@ -6024,14 +5983,7 @@ paths:
         400:
           description: "Bad parameter"
           schema:
-            allOf:
-              - $ref: "#/definitions/ErrorResponse"
-              - type: "object"
-                properties:
-                  message:
-                    description: "The error message. Either \"must specify path parameter\" (path cannot be empty) or \"not a directory\" (path was asserted to be a directory but exists as a file)."
-                    type: "string"
-                    x-nullable: false
+            $ref: "#/definitions/ErrorResponse"
         404:
           description: "Container or path does not exist"
           schema:
@@ -6057,7 +6009,10 @@ paths:
       tags: ["Container"]
     put:
       summary: "Extract an archive of files or folders to a directory in a container"
-      description: "Upload a tar archive to be extracted to a path in the filesystem of container id."
+      description: |
+        Upload a tar archive to be extracted to a path in the filesystem of container id.
+        `path` parameter is asserted to be a directory. If it exists as a file, 400 error
+        will be returned with message "not a directory".
       operationId: "PutContainerArchive"
       consumes: ["application/x-tar", "application/octet-stream"]
       responses:
@@ -6067,6 +6022,9 @@ paths:
           description: "Bad parameter"
           schema:
             $ref: "#/definitions/ErrorResponse"
+          examples:
+            application/json:
+              message: "not a directory"
         403:
           description: "Permission denied, the volume or container rootfs is marked as read-only."
           schema:
@@ -6375,6 +6333,16 @@ paths:
           description: "Target build stage"
           type: "string"
           default: ""
+        - name: "version"
+          in: "query"
+          type: "string"
+          default: "1"
+          enum: ["1", "2"]
+          description: |
+            Version of the builder backend to use.
+
+            - `1` is the first generation classic (deprecated) builder in the Docker daemon (default)
+            - `2` is [BuildKit](https://github.com/moby/buildkit)
       responses:
         200:
           description: "no error"
@@ -6674,12 +6642,23 @@ paths:
       parameters:
         - name: "name"
           in: "path"
-          description: "Image name or ID."
+          description: |
+            Name of the image to push. For example, `registry.example.com/myimage`.
+            The image must be present in the local image store with the same name.
+
+            The name should be provided without tag; if a tag is provided, it
+            is ignored. For example, `registry.example.com/myimage:latest` is
+            considered equivalent to `registry.example.com/myimage`.
+
+            Use the `tag` parameter to specify the tag to push.
           type: "string"
           required: true
         - name: "tag"
           in: "query"
-          description: "The tag to associate with the image on the registry."
+          description: |
+            Tag of the image to push. For example, `latest`. If no tag is provided,
+            all tags of the given image that are present in the local image store
+            are pushed.
           type: "string"
         - name: "X-Registry-Auth"
           in: "header"
@@ -7025,7 +7004,7 @@ paths:
             type: "string"
             example: "OK"
           headers:
-            API-Version:
+            Api-Version:
               type: "string"
               description: "Max API Version the server supports"
             Docker-Experimental:
@@ -7562,10 +7541,12 @@ paths:
           type: "string"
         - name: "h"
           in: "query"
+          required: true
           description: "Height of the TTY session in characters"
           type: "integer"
         - name: "w"
           in: "query"
+          required: true
           description: "Width of the TTY session in characters"
           type: "integer"
       tags: ["Exec"]
@@ -8023,6 +8004,10 @@ paths:
             example:
               Id: "22be93d5babb089c5aab8dbc369042fad48ff791584ca2da2100db837a1c7c30"
               Warning: ""
+        400:
+          description: "bad parameter"
+          schema:
+            $ref: "#/definitions/ErrorResponse"
         403:
           description: "operation not supported for pre-defined networks"
           schema:
@@ -8471,6 +8456,12 @@ paths:
           description: "The name of the plugin. The `:latest` tag is optional, and is the default if omitted."
           required: true
           type: "string"
+        - name: "force"
+          in: "query"
+          description: |
+            Force disable a plugin even if still in use.
+          required: false
+          type: "boolean"
       tags: ["Plugin"]
   /plugins/{name}/upgrade:
     post:
@@ -8887,6 +8878,7 @@ paths:
             example:
               ListenAddr: "0.0.0.0:2377"
               AdvertiseAddr: "192.168.1.1:2377"
+              DataPathAddr: "192.168.1.1"
               RemoteAddrs:
                 - "node1:2377"
               JoinToken: "SWMTKN-1-3pu6hszjas19xyp7ghgosyx9k8atbfcr8p2is99znpy26u2lkl-7p73s1dx5in4tatdymyhg9hu2"

@@ -4,11 +4,11 @@ import (
 	"context"
 
 	api "github.com/containerd/containerd/api/services/content/v1"
-	"github.com/containerd/containerd/content"
-	"github.com/containerd/containerd/content/proxy"
+	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/core/content/proxy"
 	"github.com/moby/buildkit/session"
 	digest "github.com/opencontainers/go-digest"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 	"google.golang.org/grpc/metadata"
 )
@@ -75,7 +75,7 @@ func (cs *callerContentStore) Writer(ctx context.Context, opts ...content.Writer
 	return w, errors.WithStack(err)
 }
 
-func (cs *callerContentStore) ReaderAt(ctx context.Context, desc ocispec.Descriptor) (content.ReaderAt, error) {
+func (cs *callerContentStore) ReaderAt(ctx context.Context, desc ocispecs.Descriptor) (content.ReaderAt, error) {
 	ctx = cs.choose(ctx)
 	ra, err := cs.store.ReaderAt(ctx, desc)
 	return ra, errors.WithStack(err)

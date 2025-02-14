@@ -14,13 +14,13 @@ var basicFunctions = template.FuncMap{
 		buf := &bytes.Buffer{}
 		enc := json.NewEncoder(buf)
 		enc.SetEscapeHTML(false)
-		enc.Encode(v)
+		_ = enc.Encode(v) //nolint:errchkjson // ignore "Error return json.Encoder.Encode` is not checked"
 		// Remove the trailing new line added by the encoder
 		return strings.TrimSpace(buf.String())
 	},
 	"split":    strings.Split,
 	"join":     strings.Join,
-	"title":    strings.Title,
+	"title":    strings.Title, //nolint:staticcheck // SA1019: strings.Title is deprecated: The rule Title uses for word boundaries does not handle Unicode punctuation properly. Use golang.org/x/text/cases instead.
 	"lower":    strings.ToLower,
 	"upper":    strings.ToUpper,
 	"pad":      padWithSpace,

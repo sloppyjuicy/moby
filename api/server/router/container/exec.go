@@ -2,23 +2,23 @@ package container // import "github.com/docker/docker/api/server/router/containe
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 
+	"github.com/containerd/log"
 	"github.com/docker/docker/api/server/httputils"
 	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/backend"
+	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/versions"
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/pkg/stdcopy"
-	"github.com/sirupsen/logrus"
+	"github.com/pkg/errors"
 )
 
-func (s *containerRouter) getExecByID(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
-	eConfig, err := s.backend.ContainerExecInspect(vars["id"])
+func (c *containerRouter) getExecByID(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+	eConfig, err := c.backend.ContainerExecInspect(vars["id"])
 	if err != nil {
 		return err
 	}
@@ -34,50 +34,42 @@ func (execCommandError) Error() string {
 
 func (execCommandError) InvalidParameter() {}
 
-func (s *containerRouter) postContainerExecCreate(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+func (c *containerRouter) postContainerExecCreate(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
 	if err := httputils.ParseForm(r); err != nil {
 		return err
 	}
-	if err := httputils.CheckForJSON(r); err != nil {
-		return err
-	}
-	name := vars["name"]
 
-	execConfig := &types.ExecConfig{}
-	if err := json.NewDecoder(r.Body).Decode(execConfig); err != nil {
-		if err == io.EOF {
-			return errdefs.InvalidParameter(errors.New("got EOF while reading request body"))
-		}
-		return errdefs.InvalidParameter(err)
+	execConfig := &container.ExecOptions{}
+	if err := httputils.ReadJSON(r, execConfig); err != nil {
+		return err
 	}
 
 	if len(execConfig.Cmd) == 0 {
 		return execCommandError{}
 	}
 
+	version := httputils.VersionFromContext(ctx)
+	if versions.LessThan(version, "1.42") {
+		// Not supported by API versions before 1.42
+		execConfig.ConsoleSize = nil
+	}
+
 	// Register an instance of Exec in container.
-	id, err := s.backend.ContainerExecCreate(name, execConfig)
+	id, err := c.backend.ContainerExecCreate(vars["name"], execConfig)
 	if err != nil {
-		logrus.Errorf("Error setting up exec command in container %s: %v", name, err)
+		log.G(ctx).Errorf("Error setting up exec command in container %s: %v", vars["name"], err)
 		return err
 	}
 
-	return httputils.WriteJSON(w, http.StatusCreated, &types.IDResponse{
+	return httputils.WriteJSON(w, http.StatusCreated, &container.ExecCreateResponse{
 		ID: id,
 	})
 }
 
 // TODO(vishh): Refactor the code to avoid having to specify stream config as part of both create and start.
-func (s *containerRouter) postContainerExecStart(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+func (c *containerRouter) postContainerExecStart(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
 	if err := httputils.ParseForm(r); err != nil {
 		return err
-	}
-
-	version := httputils.VersionFromContext(ctx)
-	if versions.GreaterThan(version, "1.21") {
-		if err := httputils.CheckForJSON(r); err != nil {
-			return err
-		}
 	}
 
 	var (
@@ -86,19 +78,30 @@ func (s *containerRouter) postContainerExecStart(ctx context.Context, w http.Res
 		stdout, stderr, outStream io.Writer
 	)
 
-	execStartCheck := &types.ExecStartCheck{}
-	if err := json.NewDecoder(r.Body).Decode(execStartCheck); err != nil {
-		if err == io.EOF {
-			return errdefs.InvalidParameter(errors.New("got EOF while reading request body"))
-		}
-		return errdefs.InvalidParameter(err)
-	}
-
-	if exists, err := s.backend.ExecExists(execName); !exists {
+	options := &container.ExecStartOptions{}
+	if err := httputils.ReadJSON(r, options); err != nil {
 		return err
 	}
 
-	if !execStartCheck.Detach {
+	if exists, err := c.backend.ExecExists(execName); !exists {
+		return err
+	}
+
+	if options.ConsoleSize != nil {
+		version := httputils.VersionFromContext(ctx)
+
+		// Not supported before 1.42
+		if versions.LessThan(version, "1.42") {
+			options.ConsoleSize = nil
+		}
+
+		// No console without tty
+		if !options.Tty {
+			options.ConsoleSize = nil
+		}
+	}
+
+	if !options.Detach {
 		var err error
 		// Setting up the streaming http interface.
 		inStream, outStream, err = httputils.HijackConnection(w)
@@ -108,49 +111,61 @@ func (s *containerRouter) postContainerExecStart(ctx context.Context, w http.Res
 		defer httputils.CloseStreams(inStream, outStream)
 
 		if _, ok := r.Header["Upgrade"]; ok {
-			fmt.Fprint(outStream, "HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.raw-stream\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n")
+			contentType := types.MediaTypeRawStream
+			if !options.Tty && versions.GreaterThanOrEqualTo(httputils.VersionFromContext(ctx), "1.42") {
+				contentType = types.MediaTypeMultiplexedStream
+			}
+			_, _ = fmt.Fprint(outStream, "HTTP/1.1 101 UPGRADED\r\nContent-Type: "+contentType+"\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n")
 		} else {
-			fmt.Fprint(outStream, "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.docker.raw-stream\r\n")
+			_, _ = fmt.Fprint(outStream, "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.docker.raw-stream\r\n")
 		}
 
 		// copy headers that were removed as part of hijack
 		if err := w.Header().WriteSubset(outStream, nil); err != nil {
 			return err
 		}
-		fmt.Fprint(outStream, "\r\n")
+		_, _ = fmt.Fprint(outStream, "\r\n")
 
 		stdin = inStream
-		stdout = outStream
-		if !execStartCheck.Tty {
+		if options.Tty {
+			stdout = outStream
+		} else {
 			stderr = stdcopy.NewStdWriter(outStream, stdcopy.Stderr)
 			stdout = stdcopy.NewStdWriter(outStream, stdcopy.Stdout)
 		}
 	}
 
 	// Now run the user process in container.
-	// Maybe we should we pass ctx here if we're not detaching?
-	if err := s.backend.ContainerExecStart(context.Background(), execName, stdin, stdout, stderr); err != nil {
-		if execStartCheck.Detach {
+	//
+	// TODO: Maybe we should we pass ctx here if we're not detaching?
+	err := c.backend.ContainerExecStart(context.Background(), execName, backend.ExecStartConfig{
+		Stdin:       stdin,
+		Stdout:      stdout,
+		Stderr:      stderr,
+		ConsoleSize: options.ConsoleSize,
+	})
+	if err != nil {
+		if options.Detach {
 			return err
 		}
-		stdout.Write([]byte(err.Error() + "\r\n"))
-		logrus.Errorf("Error running exec %s in container: %v", execName, err)
+		_, _ = fmt.Fprintf(stdout, "%v\r\n", err)
+		log.G(ctx).Errorf("Error running exec %s in container: %v", execName, err)
 	}
 	return nil
 }
 
-func (s *containerRouter) postContainerExecResize(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+func (c *containerRouter) postContainerExecResize(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
 	if err := httputils.ParseForm(r); err != nil {
 		return err
 	}
-	height, err := strconv.Atoi(r.Form.Get("h"))
+	height, err := httputils.Uint32Value(r, "h")
 	if err != nil {
-		return errdefs.InvalidParameter(err)
+		return errdefs.InvalidParameter(errors.Wrapf(err, "invalid resize height %q", r.Form.Get("h")))
 	}
-	width, err := strconv.Atoi(r.Form.Get("w"))
+	width, err := httputils.Uint32Value(r, "w")
 	if err != nil {
-		return errdefs.InvalidParameter(err)
+		return errdefs.InvalidParameter(errors.Wrapf(err, "invalid resize width %q", r.Form.Get("w")))
 	}
 
-	return s.backend.ContainerExecResize(vars["name"], height, width)
+	return c.backend.ContainerExecResize(ctx, vars["name"], height, width)
 }

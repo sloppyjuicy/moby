@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/docker/docker/errdefs"
+	"gotest.tools/v3/assert"
+	is "gotest.tools/v3/assert/cmp"
 )
 
 func TestPluginSetError(t *testing.T) {
@@ -18,9 +20,15 @@ func TestPluginSetError(t *testing.T) {
 	}
 
 	err := client.PluginSet(context.Background(), "plugin_name", []string{})
-	if !errdefs.IsSystem(err) {
-		t.Fatalf("expected a Server Error, got %[1]T: %[1]v", err)
-	}
+	assert.Check(t, is.ErrorType(err, errdefs.IsSystem))
+
+	err = client.PluginSet(context.Background(), "", []string{})
+	assert.Check(t, is.ErrorType(err, errdefs.IsInvalidParameter))
+	assert.Check(t, is.ErrorContains(err, "value is empty"))
+
+	err = client.PluginSet(context.Background(), "    ", []string{})
+	assert.Check(t, is.ErrorType(err, errdefs.IsInvalidParameter))
+	assert.Check(t, is.ErrorContains(err, "value is empty"))
 }
 
 func TestPluginSet(t *testing.T) {

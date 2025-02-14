@@ -7,10 +7,10 @@ import (
 	types "github.com/docker/docker/api/types/swarm"
 	"github.com/docker/docker/api/types/swarm/runtime"
 	"github.com/docker/docker/pkg/namesgenerator"
-	swarmapi "github.com/docker/swarmkit/api"
-	"github.com/docker/swarmkit/api/genericresource"
 	"github.com/gogo/protobuf/proto"
 	gogotypes "github.com/gogo/protobuf/types"
+	swarmapi "github.com/moby/swarmkit/v2/api"
+	"github.com/moby/swarmkit/v2/api/genericresource"
 	"github.com/pkg/errors"
 )
 
@@ -69,6 +69,8 @@ func ServiceFromGRPC(s swarmapi.Service) (types.Service, error) {
 			service.UpdateStatus.State = types.UpdateStateRollbackPaused
 		case swarmapi.UpdateStatus_ROLLBACK_COMPLETED:
 			service.UpdateStatus.State = types.UpdateStateRollbackCompleted
+		default:
+			// TODO(thaJeztah): make switch exhaustive; add api.UpdateStatus_UNKNOWN
 		}
 
 		startedAt, _ := gogotypes.TimestampFromProto(s.UpdateStatus.StartedAt)
@@ -96,7 +98,6 @@ func serviceSpecFromGRPC(spec *swarmapi.ServiceSpec) (*types.ServiceSpec, error)
 	for _, n := range spec.Networks {
 		netConfig := types.NetworkAttachmentConfig{Target: n.Target, Aliases: n.Aliases, DriverOpts: n.DriverAttachmentOpts}
 		serviceNetworks = append(serviceNetworks, netConfig)
-
 	}
 
 	taskTemplate, err := taskSpecFromGRPC(spec.Task)
@@ -159,8 +160,8 @@ func ServiceSpecToGRPC(s types.ServiceSpec) (swarmapi.ServiceSpec, error) {
 		name = namesgenerator.GetRandomName(0)
 	}
 
-	serviceNetworks := make([]*swarmapi.NetworkAttachmentConfig, 0, len(s.Networks))
-	for _, n := range s.Networks {
+	serviceNetworks := make([]*swarmapi.NetworkAttachmentConfig, 0, len(s.Networks)) //nolint:staticcheck // ignore SA1019: field is deprecated.
+	for _, n := range s.Networks {                                                   //nolint:staticcheck // ignore SA1019: field is deprecated.
 		netConfig := &swarmapi.NetworkAttachmentConfig{Target: n.Target, Aliases: n.Aliases, DriverAttachmentOpts: n.DriverOpts}
 		serviceNetworks = append(serviceNetworks, netConfig)
 	}
@@ -169,7 +170,6 @@ func ServiceSpecToGRPC(s types.ServiceSpec) (swarmapi.ServiceSpec, error) {
 	for _, n := range s.TaskTemplate.Networks {
 		netConfig := &swarmapi.NetworkAttachmentConfig{Target: n.Target, Aliases: n.Aliases, DriverAttachmentOpts: n.DriverOpts}
 		taskNetworks = append(taskNetworks, netConfig)
-
 	}
 
 	spec := swarmapi.ServiceSpec{
@@ -473,7 +473,6 @@ func resourcesToGRPC(res *types.ResourceRequirements) *swarmapi.ResourceRequirem
 				MemoryBytes: res.Reservations.MemoryBytes,
 				Generic:     GenericResourcesToGRPC(res.Reservations.GenericResources),
 			}
-
 		}
 	}
 	return reqs
@@ -536,7 +535,6 @@ func restartPolicyToGRPC(p *types.RestartPolicy) (*swarmapi.RestartPolicy, error
 		}
 		if p.MaxAttempts != nil {
 			rp.MaxAttempts = *p.MaxAttempts
-
 		}
 	}
 	return rp, nil

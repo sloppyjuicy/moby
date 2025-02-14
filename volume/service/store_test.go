@@ -15,7 +15,6 @@ import (
 	volumetestutils "github.com/docker/docker/volume/testutils"
 	"github.com/google/go-cmp/cmp"
 	"gotest.tools/v3/assert"
-	is "gotest.tools/v3/assert/cmp"
 )
 
 func TestCreate(t *testing.T) {
@@ -121,6 +120,7 @@ func TestList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer s.Shutdown()
 	ls, _, err = s.Find(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -299,7 +299,7 @@ func TestRefDerefRemove(t *testing.T) {
 	assert.NilError(t, err)
 
 	err = s.Remove(ctx, v)
-	assert.Assert(t, is.ErrorContains(err, ""))
+	assert.ErrorContains(t, err, "")
 	assert.Equal(t, errVolumeInUse, err.(*OpErr).Err)
 
 	s.Release(ctx, v.Name(), "test-ref")
@@ -317,7 +317,7 @@ func TestGet(t *testing.T) {
 
 	ctx := context.Background()
 	_, err := s.Get(ctx, "not-exist")
-	assert.Assert(t, is.ErrorContains(err, ""))
+	assert.ErrorContains(t, err, "")
 	assert.Equal(t, errNoSuchVolume, err.(*OpErr).Err)
 
 	v1, err := s.Create(ctx, "test", driverName, opts.WithCreateLabels(map[string]string{"a": "1"}))
@@ -344,7 +344,7 @@ func TestGetWithReference(t *testing.T) {
 
 	ctx := context.Background()
 	_, err := s.Get(ctx, "not-exist", opts.WithGetDriver(driverName), opts.WithGetReference("test-ref"))
-	assert.Assert(t, is.ErrorContains(err, ""))
+	assert.ErrorContains(t, err, "")
 
 	v1, err := s.Create(ctx, "test", driverName, opts.WithCreateLabels(map[string]string{"a": "1"}))
 	assert.NilError(t, err)
@@ -354,7 +354,7 @@ func TestGetWithReference(t *testing.T) {
 	assert.DeepEqual(t, v1, v2, cmpVolume)
 
 	err = s.Remove(ctx, v2)
-	assert.Assert(t, is.ErrorContains(err, ""))
+	assert.ErrorContains(t, err, "")
 	assert.Equal(t, errVolumeInUse, err.(*OpErr).Err)
 
 	s.Release(ctx, v2.Name(), "test-ref")
@@ -367,7 +367,7 @@ var cmpVolume = cmp.AllowUnexported(volumetestutils.FakeVolume{}, volumeWrapper{
 func setupTest(t *testing.T) (*VolumeStore, func()) {
 	t.Helper()
 
-	dirName := strings.Replace(t.Name(), string(os.PathSeparator), "_", -1)
+	dirName := strings.ReplaceAll(t.Name(), string(os.PathSeparator), "_")
 	dir, err := os.MkdirTemp("", dirName)
 	assert.NilError(t, err)
 
@@ -378,7 +378,7 @@ func setupTest(t *testing.T) (*VolumeStore, func()) {
 	}
 
 	s, err := NewStore(dir, volumedrivers.NewStore(nil))
-	assert.Check(t, err)
+	assert.NilError(t, err)
 	return s, func() {
 		s.Shutdown()
 		cleanup()
@@ -403,7 +403,7 @@ func TestFilterFunc(t *testing.T) {
 		{desc: "test nil list", vols: nil, expect: nil, fn: func(volume.Volume) bool { return true }},
 		{desc: "test empty list", vols: []volume.Volume{}, expect: []volume.Volume{}, fn: func(volume.Volume) bool { return true }},
 		{desc: "test filter non-empty to empty", vols: []volume.Volume{testVolume}, expect: []volume.Volume{}, fn: func(volume.Volume) bool { return false }},
-		{desc: "test nothing to fitler non-empty list", vols: []volume.Volume{testVolume}, expect: []volume.Volume{testVolume}, fn: func(volume.Volume) bool { return true }},
+		{desc: "test nothing to filter non-empty list", vols: []volume.Volume{testVolume}, expect: []volume.Volume{testVolume}, fn: func(volume.Volume) bool { return true }},
 		{desc: "test filter some", vols: []volume.Volume{testVolume, testVolume2}, expect: []volume.Volume{testVolume}, fn: func(v volume.Volume) bool { return v.Name() == testVolume.Name() }},
 		{desc: "test filter middle", vols: []volume.Volume{testVolume, testVolume2, testVolume3}, expect: []volume.Volume{testVolume, testVolume3}, fn: func(v volume.Volume) bool { return v.Name() != testVolume2.Name() }},
 		{desc: "test filter middle and last", vols: []volume.Volume{testVolume, testVolume2, testVolume3}, expect: []volume.Volume{testVolume}, fn: func(v volume.Volume) bool { return v.Name() != testVolume2.Name() && v.Name() != testVolume3.Name() }},

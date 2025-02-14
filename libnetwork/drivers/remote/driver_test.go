@@ -2,6 +2,7 @@ package remote
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,11 +15,13 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/docker/docker/libnetwork/datastore"
 	"github.com/docker/docker/libnetwork/discoverapi"
 	"github.com/docker/docker/libnetwork/driverapi"
+	"github.com/docker/docker/libnetwork/options"
+	"github.com/docker/docker/libnetwork/scope"
 	"github.com/docker/docker/libnetwork/types"
 	"github.com/docker/docker/pkg/plugins"
+	"gotest.tools/v3/assert"
 )
 
 func decodeToMap(r *http.Request) (res map[string]interface{}, err error) {
@@ -46,13 +49,13 @@ func setupPlugin(t *testing.T, name string, mux *http.ServeMux) func() {
 		specPath = filepath.Join(os.Getenv("programdata"), "docker", "plugins")
 	}
 
-	if err := os.MkdirAll(specPath, 0755); err != nil {
+	if err := os.MkdirAll(specPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
 	defer func() {
 		if t.Failed() {
-			os.RemoveAll(specPath)
+			_ = os.RemoveAll(specPath)
 		}
 	}()
 
@@ -61,12 +64,12 @@ func setupPlugin(t *testing.T, name string, mux *http.ServeMux) func() {
 		t.Fatal("Failed to start an HTTP Server")
 	}
 
-	if err := os.WriteFile(filepath.Join(specPath, name+".spec"), []byte(server.URL), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(specPath, name+".spec"), []byte(server.URL), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	mux.HandleFunc("/Plugin.Activate", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/vnd.docker.plugins.v1+json")
+		w.Header().Set("Content-Type", plugins.VersionMimetype)
 		fmt.Fprintf(w, `{"Implements": ["%s"]}`, driverapi.NetworkPluginEndpointType)
 	})
 
@@ -80,8 +83,9 @@ func setupPlugin(t *testing.T, name string, mux *http.ServeMux) func() {
 
 type testEndpoint struct {
 	t                     *testing.T
-	src                   string
-	dst                   string
+	srcName               string
+	dstPrefix             string
+	dstName               string
 	address               string
 	addressIPv6           string
 	macAddress            string
@@ -93,10 +97,6 @@ type testEndpoint struct {
 	destination           string
 	routeType             int
 	disableGatewayService bool
-}
-
-func (test *testEndpoint) Interface() driverapi.InterfaceInfo {
-	return test
 }
 
 func (test *testEndpoint) Address() *net.IPNet {
@@ -128,7 +128,7 @@ func (test *testEndpoint) SetMacAddress(mac net.HardwareAddr) error {
 		return types.ForbiddenErrorf("endpoint interface MAC address present (%s). Cannot be modified with %s.", test.macAddress, mac)
 	}
 	if mac == nil {
-		return types.BadRequestErrorf("tried to set nil MAC address to endpoint interface")
+		return types.InvalidParameterErrorf("tried to set nil MAC address to endpoint interface")
 	}
 	test.macAddress = mac.String()
 	return nil
@@ -136,7 +136,7 @@ func (test *testEndpoint) SetMacAddress(mac net.HardwareAddr) error {
 
 func (test *testEndpoint) SetIPAddress(address *net.IPNet) error {
 	if address.IP == nil {
-		return types.BadRequestErrorf("tried to set nil IP address to endpoint interface")
+		return types.InvalidParameterErrorf("tried to set nil IP address to endpoint interface")
 	}
 	if address.IP.To4() == nil {
 		return setAddress(&test.addressIPv6, address)
@@ -167,11 +167,11 @@ func compareIPs(t *testing.T, kind string, shouldBe string, supplied net.IP) {
 }
 
 func compareIPNets(t *testing.T, kind string, shouldBe string, supplied net.IPNet) {
-	_, net, _ := net.ParseCIDR(shouldBe)
-	if net == nil {
+	_, ipNet, _ := net.ParseCIDR(shouldBe)
+	if ipNet == nil {
 		t.Fatalf(`Invalid IP network to test against: "%s"`, shouldBe)
 	}
-	if !types.CompareIPNet(net, &supplied) {
+	if !types.CompareIPNet(ipNet, &supplied) {
 		t.Fatalf(`%s IP networks are not equal: expected "%s", got %v`, kind, shouldBe, supplied)
 	}
 }
@@ -186,13 +186,14 @@ func (test *testEndpoint) SetGatewayIPv6(ipv6 net.IP) error {
 	return nil
 }
 
-func (test *testEndpoint) SetNames(src string, dst string) error {
-	if test.src != src {
-		test.t.Fatalf(`Wrong SrcName; expected "%s", got "%s"`, test.src, src)
-	}
-	if test.dst != dst {
-		test.t.Fatalf(`Wrong DstPrefix; expected "%s", got "%s"`, test.dst, dst)
-	}
+func (test *testEndpoint) NetnsPath() string { return "" }
+
+func (test *testEndpoint) SetCreatedInContainer(bool) {}
+
+func (test *testEndpoint) SetNames(srcName, dstPrefix, dstName string) error {
+	assert.Equal(test.t, test.srcName, srcName)
+	assert.Equal(test.t, test.dstPrefix, dstPrefix)
+	assert.Equal(test.t, test.dstName, dstName)
 	return nil
 }
 
@@ -216,7 +217,7 @@ func (test *testEndpoint) AddTableEntry(tableName string, key string, value []by
 }
 
 func TestGetEmptyCapabilities(t *testing.T) {
-	var plugin = "test-net-driver-empty-cap"
+	plugin := "test-net-driver-empty-cap"
 
 	mux := http.NewServeMux()
 	defer setupPlugin(t, plugin, mux)()
@@ -239,14 +240,14 @@ func TestGetEmptyCapabilities(t *testing.T) {
 		t.Fatal("Driver type does not match that given")
 	}
 
-	_, err = d.(*driver).getCapabilities()
+	_, err = d.getCapabilities()
 	if err == nil {
 		t.Fatal("There should be error reported when get empty capability")
 	}
 }
 
 func TestGetExtraCapabilities(t *testing.T) {
-	var plugin = "test-net-driver-extra-cap"
+	plugin := "test-net-driver-extra-cap"
 
 	mux := http.NewServeMux()
 	defer setupPlugin(t, plugin, mux)()
@@ -273,18 +274,18 @@ func TestGetExtraCapabilities(t *testing.T) {
 		t.Fatal("Driver type does not match that given")
 	}
 
-	c, err := d.(*driver).getCapabilities()
+	c, err := d.getCapabilities()
 	if err != nil {
 		t.Fatal(err)
-	} else if c.DataScope != datastore.LocalScope {
+	} else if c.DataScope != scope.Local {
 		t.Fatalf("get capability '%s', expecting 'local'", c.DataScope)
-	} else if c.ConnectivityScope != datastore.GlobalScope {
-		t.Fatalf("get capability '%s', expecting %q", c.ConnectivityScope, datastore.GlobalScope)
+	} else if c.ConnectivityScope != scope.Global {
+		t.Fatalf("get capability '%s', expecting %q", c.ConnectivityScope, scope.Global)
 	}
 }
 
 func TestGetInvalidCapabilities(t *testing.T) {
-	var plugin = "test-net-driver-invalid-cap"
+	plugin := "test-net-driver-invalid-cap"
 
 	mux := http.NewServeMux()
 	defer setupPlugin(t, plugin, mux)()
@@ -309,19 +310,19 @@ func TestGetInvalidCapabilities(t *testing.T) {
 		t.Fatal("Driver type does not match that given")
 	}
 
-	_, err = d.(*driver).getCapabilities()
+	_, err = d.getCapabilities()
 	if err == nil {
 		t.Fatal("There should be error reported when get invalid capability")
 	}
 }
 
 func TestRemoteDriver(t *testing.T) {
-	var plugin = "test-net-driver"
+	plugin := "test-net-driver"
 
 	ep := &testEndpoint{
 		t:              t,
-		src:            "vethsrc",
-		dst:            "vethdst",
+		srcName:        "vethsrc",
+		dstPrefix:      "vethdst",
 		address:        "192.168.5.7/16",
 		addressIPv6:    "2001:DB8::5:7/48",
 		macAddress:     "ab:cd:ef:ee:ee:ee",
@@ -341,7 +342,15 @@ func TestRemoteDriver(t *testing.T) {
 
 	handle(t, mux, "GetCapabilities", func(msg map[string]interface{}) interface{} {
 		return map[string]interface{}{
-			"Scope": "global",
+			"Scope":          "global",
+			"GwAllocChecker": true,
+		}
+	})
+	handle(t, mux, "GwAllocCheck", func(msg map[string]interface{}) interface{} {
+		options := msg["Options"].(map[string]interface{})
+		return map[string]interface{}{
+			"SkipIPv4": options["skip4"].(bool),
+			"SkipIPv6": options["skip6"].(bool),
 		}
 	})
 	handle(t, mux, "CreateNetwork", func(msg map[string]interface{}) interface{} {
@@ -380,8 +389,9 @@ func TestRemoteDriver(t *testing.T) {
 			"HostsPath":      ep.hostsPath,
 			"ResolvConfPath": ep.resolvConfPath,
 			"InterfaceName": map[string]interface{}{
-				"SrcName":   ep.src,
-				"DstPrefix": ep.dst,
+				"SrcName":   ep.srcName,
+				"DstPrefix": ep.dstPrefix,
+				"DstName":   ep.dstName,
 			},
 			"StaticRoutes": []map[string]interface{}{
 				{
@@ -427,11 +437,24 @@ func TestRemoteDriver(t *testing.T) {
 		t.Fatal("Driver type does not match that given")
 	}
 
-	c, err := d.(*driver).getCapabilities()
+	c, err := d.getCapabilities()
 	if err != nil {
 		t.Fatal(err)
-	} else if c.DataScope != datastore.GlobalScope {
+	} else if c.DataScope != scope.Global {
 		t.Fatalf("get capability '%s', expecting 'global'", c.DataScope)
+	}
+
+	skipIPv4, skipIPv6, err := d.GetSkipGwAlloc(options.Generic{"skip4": true, "skip6": false})
+	if err != nil {
+		t.Fatal(err)
+	} else if !skipIPv4 || skipIPv6 {
+		t.Fatalf("GetSkipGwAlloc, got skipIPv4:%t skipIPv6:%t", skipIPv4, skipIPv6)
+	}
+	skipIPv4, skipIPv6, err = d.GetSkipGwAlloc(options.Generic{"skip4": false, "skip6": true})
+	if err != nil {
+		t.Fatal(err)
+	} else if skipIPv4 || !skipIPv6 {
+		t.Fatalf("GetSkipGwAlloc, got skipIPv4:%t skipIPv6:%t", skipIPv4, skipIPv6)
 	}
 
 	netID := "dummy-network"
@@ -442,7 +465,7 @@ func TestRemoteDriver(t *testing.T) {
 
 	endID := "dummy-endpoint"
 	ifInfo := &testEndpoint{}
-	err = d.CreateEndpoint(netID, endID, ifInfo, map[string]interface{}{})
+	err = d.CreateEndpoint(context.Background(), netID, endID, ifInfo, map[string]interface{}{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -455,7 +478,7 @@ func TestRemoteDriver(t *testing.T) {
 	}
 
 	joinOpts := map[string]interface{}{"foo": "fooValue"}
-	err = d.Join(netID, endID, "sandbox-key", ep, joinOpts)
+	err = d.Join(context.Background(), netID, endID, "sandbox-key", ep, nil, joinOpts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -484,7 +507,7 @@ func TestRemoteDriver(t *testing.T) {
 }
 
 func TestDriverError(t *testing.T) {
-	var plugin = "test-net-driver-error"
+	plugin := "test-net-driver-error"
 
 	mux := http.NewServeMux()
 	defer setupPlugin(t, plugin, mux)()
@@ -504,15 +527,15 @@ func TestDriverError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	driver := newDriver(plugin, client)
 
-	if err := driver.CreateEndpoint("dummy", "dummy", &testEndpoint{t: t}, map[string]interface{}{}); err == nil {
+	d := newDriver(plugin, client)
+	if err := d.CreateEndpoint(context.Background(), "dummy", "dummy", &testEndpoint{t: t}, map[string]interface{}{}); err == nil {
 		t.Fatal("Expected error from driver")
 	}
 }
 
 func TestMissingValues(t *testing.T) {
-	var plugin = "test-net-driver-missing"
+	plugin := "test-net-driver-missing"
 
 	mux := http.NewServeMux()
 	defer setupPlugin(t, plugin, mux)()
@@ -541,17 +564,16 @@ func TestMissingValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	driver := newDriver(plugin, client)
 
-	if err := driver.CreateEndpoint("dummy", "dummy", ep, map[string]interface{}{}); err != nil {
+	d := newDriver(plugin, client)
+	if err := d.CreateEndpoint(context.Background(), "dummy", "dummy", ep, map[string]interface{}{}); err != nil {
 		t.Fatal(err)
 	}
 }
 
-type rollbackEndpoint struct {
-}
+type rollbackEndpoint struct{}
 
-func (r *rollbackEndpoint) Interface() driverapi.InterfaceInfo {
+func (r *rollbackEndpoint) Interface() *rollbackEndpoint {
 	return r
 }
 
@@ -575,8 +597,12 @@ func (r *rollbackEndpoint) SetIPAddress(ip *net.IPNet) error {
 	return errors.New("invalid ip")
 }
 
+func (r *rollbackEndpoint) NetnsPath() string { return "" }
+
+func (r *rollbackEndpoint) SetCreatedInContainer(bool) {}
+
 func TestRollback(t *testing.T) {
-	var plugin = "test-net-driver-rollback"
+	plugin := "test-net-driver-rollback"
 
 	mux := http.NewServeMux()
 	defer setupPlugin(t, plugin, mux)()
@@ -607,11 +633,10 @@ func TestRollback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	driver := newDriver(plugin, client)
 
+	d := newDriver(plugin, client)
 	ep := &rollbackEndpoint{}
-
-	if err := driver.CreateEndpoint("dummy", "dummy", ep.Interface(), map[string]interface{}{}); err == nil {
+	if err := d.CreateEndpoint(context.Background(), "dummy", "dummy", ep.Interface(), map[string]interface{}{}); err == nil {
 		t.Fatal("Expected error from driver")
 	}
 	if !rolledback {

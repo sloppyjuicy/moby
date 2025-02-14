@@ -8,28 +8,51 @@ import (
 	"net/http"
 	"strings"
 	"testing"
-	"time"
 
+	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/errdefs"
+	"gotest.tools/v3/assert"
+	is "gotest.tools/v3/assert/cmp"
 )
 
 func TestContainerRestartError(t *testing.T) {
 	client := &Client{
 		client: newMockClient(errorMock(http.StatusInternalServerError, "Server error")),
 	}
-	timeout := 0 * time.Second
-	err := client.ContainerRestart(context.Background(), "nothing", &timeout)
-	if !errdefs.IsSystem(err) {
-		t.Fatalf("expected a Server Error, got %[1]T: %[1]v", err)
-	}
+	err := client.ContainerRestart(context.Background(), "nothing", container.StopOptions{})
+	assert.Check(t, is.ErrorType(err, errdefs.IsSystem))
+
+	err = client.ContainerRestart(context.Background(), "", container.StopOptions{})
+	assert.Check(t, is.ErrorType(err, errdefs.IsInvalidParameter))
+	assert.Check(t, is.ErrorContains(err, "value is empty"))
+
+	err = client.ContainerRestart(context.Background(), "    ", container.StopOptions{})
+	assert.Check(t, is.ErrorType(err, errdefs.IsInvalidParameter))
+	assert.Check(t, is.ErrorContains(err, "value is empty"))
+}
+
+// TestContainerRestartConnectionError verifies that connection errors occurring
+// during API-version negotiation are not shadowed by API-version errors.
+//
+// Regression test for https://github.com/docker/cli/issues/4890
+func TestContainerRestartConnectionError(t *testing.T) {
+	client, err := NewClientWithOpts(WithAPIVersionNegotiation(), WithHost("tcp://no-such-host.invalid"))
+	assert.NilError(t, err)
+
+	err = client.ContainerRestart(context.Background(), "nothing", container.StopOptions{})
+	assert.Check(t, is.ErrorType(err, IsErrConnectionFailed))
 }
 
 func TestContainerRestart(t *testing.T) {
-	expectedURL := "/containers/container_id/restart"
+	const expectedURL = "/v1.42/containers/container_id/restart"
 	client := &Client{
 		client: newMockClient(func(req *http.Request) (*http.Response, error) {
 			if !strings.HasPrefix(req.URL.Path, expectedURL) {
 				return nil, fmt.Errorf("Expected URL '%s', got '%s'", expectedURL, req.URL)
+			}
+			s := req.URL.Query().Get("signal")
+			if s != "SIGKILL" {
+				return nil, fmt.Errorf("signal not set in URL query. Expected 'SIGKILL', got '%s'", s)
 			}
 			t := req.URL.Query().Get("t")
 			if t != "100" {
@@ -40,9 +63,13 @@ func TestContainerRestart(t *testing.T) {
 				Body:       io.NopCloser(bytes.NewReader([]byte(""))),
 			}, nil
 		}),
+		version: "1.42",
 	}
-	timeout := 100 * time.Second
-	err := client.ContainerRestart(context.Background(), "container_id", &timeout)
+	timeout := 100
+	err := client.ContainerRestart(context.Background(), "container_id", container.StopOptions{
+		Signal:  "SIGKILL",
+		Timeout: &timeout,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

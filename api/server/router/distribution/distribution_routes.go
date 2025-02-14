@@ -2,20 +2,20 @@ package distribution // import "github.com/docker/docker/api/server/router/distr
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
-	"strings"
+	"os"
 
+	"github.com/distribution/reference"
+	"github.com/docker/distribution"
 	"github.com/docker/distribution/manifest/manifestlist"
 	"github.com/docker/distribution/manifest/schema1"
 	"github.com/docker/distribution/manifest/schema2"
-	"github.com/docker/distribution/reference"
 	"github.com/docker/docker/api/server/httputils"
-	"github.com/docker/docker/api/types"
-	registrytypes "github.com/docker/docker/api/types/registry"
+	"github.com/docker/docker/api/types/registry"
+	distributionpkg "github.com/docker/docker/distribution"
 	"github.com/docker/docker/errdefs"
-	v1 "github.com/opencontainers/image-spec/specs-go/v1"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 )
 
@@ -26,25 +26,10 @@ func (s *distributionRouter) getDistributionInfo(ctx context.Context, w http.Res
 
 	w.Header().Set("Content-Type", "application/json")
 
-	var (
-		config              = &types.AuthConfig{}
-		authEncoded         = r.Header.Get("X-Registry-Auth")
-		distributionInspect registrytypes.DistributionInspect
-	)
-
-	if authEncoded != "" {
-		authJSON := base64.NewDecoder(base64.URLEncoding, strings.NewReader(authEncoded))
-		if err := json.NewDecoder(authJSON).Decode(&config); err != nil {
-			// for a search it is not an error if no auth was given
-			// to increase compatibility with the existing api it is defaulting to be empty
-			config = &types.AuthConfig{}
-		}
-	}
-
-	image := vars["name"]
+	imgName := vars["name"]
 
 	// TODO why is reference.ParseAnyReference() / reference.ParseNormalizedNamed() not using the reference.ErrTagInvalidFormat (and so on) errors?
-	ref, err := reference.ParseAnyReference(image)
+	ref, err := reference.ParseAnyReference(imgName)
 	if err != nil {
 		return errdefs.InvalidParameter(err)
 	}
@@ -54,28 +39,58 @@ func (s *distributionRouter) getDistributionInfo(ctx context.Context, w http.Res
 			// full image ID
 			return errors.Errorf("no manifest found for full image ID")
 		}
-		return errdefs.InvalidParameter(errors.Errorf("unknown image reference format: %s", image))
+		return errdefs.InvalidParameter(errors.Errorf("unknown image reference format: %s", imgName))
 	}
 
-	distrepo, err := s.backend.GetRepository(ctx, namedRef, config)
+	// For a search it is not an error if no auth was given. Ignore invalid
+	// AuthConfig to increase compatibility with the existing API.
+	authConfig, _ := registry.DecodeAuthConfig(r.Header.Get(registry.AuthHeader))
+	repos, err := s.backend.GetRepositories(ctx, namedRef, authConfig)
 	if err != nil {
 		return err
 	}
-	blobsrvc := distrepo.Blobs(ctx)
 
+	// Fetch the manifest; if a mirror is configured, try the mirror first,
+	// but continue with upstream on failure.
+	//
+	// FIXME(thaJeztah): construct "repositories" on-demand;
+	// GetRepositories() will attempt to connect to all endpoints (registries),
+	// but we may only need the first one if it contains the manifest we're
+	// looking for, or if the configured mirror is a pull-through mirror.
+	//
+	// Logic for this could be implemented similar to "distribution.Pull()",
+	// which uses the "pullEndpoints" utility to iterate over the list
+	// of endpoints;
+	//
+	// - https://github.com/moby/moby/blob/12c7411b6b7314bef130cd59f1c7384a7db06d0b/distribution/pull.go#L17-L31
+	// - https://github.com/moby/moby/blob/12c7411b6b7314bef130cd59f1c7384a7db06d0b/distribution/pull.go#L76-L152
+	var lastErr error
+	for _, repo := range repos {
+		distributionInspect, err := s.fetchManifest(ctx, repo, namedRef)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return httputils.WriteJSON(w, http.StatusOK, distributionInspect)
+	}
+	return lastErr
+}
+
+func (s *distributionRouter) fetchManifest(ctx context.Context, distrepo distribution.Repository, namedRef reference.Named) (registry.DistributionInspect, error) {
+	var distributionInspect registry.DistributionInspect
 	if canonicalRef, ok := namedRef.(reference.Canonical); !ok {
 		namedRef = reference.TagNameOnly(namedRef)
 
 		taggedRef, ok := namedRef.(reference.NamedTagged)
 		if !ok {
-			return errdefs.InvalidParameter(errors.Errorf("image reference not tagged: %s", image))
+			return registry.DistributionInspect{}, errdefs.InvalidParameter(errors.Errorf("image reference not tagged: %s", namedRef))
 		}
 
 		descriptor, err := distrepo.Tags(ctx).Get(ctx, taggedRef.Tag())
 		if err != nil {
-			return err
+			return registry.DistributionInspect{}, err
 		}
-		distributionInspect.Descriptor = v1.Descriptor{
+		distributionInspect.Descriptor = ocispec.Descriptor{
 			MediaType: descriptor.MediaType,
 			Digest:    descriptor.Digest,
 			Size:      descriptor.Size,
@@ -90,7 +105,7 @@ func (s *distributionRouter) getDistributionInfo(ctx context.Context, w http.Res
 	// we have a digest, so we can retrieve the manifest
 	mnfstsrvc, err := distrepo.Manifests(ctx)
 	if err != nil {
-		return err
+		return registry.DistributionInspect{}, err
 	}
 	mnfst, err := mnfstsrvc.Get(ctx, distributionInspect.Descriptor.Digest)
 	if err != nil {
@@ -102,14 +117,14 @@ func (s *distributionRouter) getDistributionInfo(ctx context.Context, w http.Res
 			reference.ErrNameEmpty,
 			reference.ErrNameTooLong,
 			reference.ErrNameNotCanonical:
-			return errdefs.InvalidParameter(err)
+			return registry.DistributionInspect{}, errdefs.InvalidParameter(err)
 		}
-		return err
+		return registry.DistributionInspect{}, err
 	}
 
 	mediaType, payload, err := mnfst.Payload()
 	if err != nil {
-		return err
+		return registry.DistributionInspect{}, err
 	}
 	// update MediaType because registry might return something incorrect
 	distributionInspect.Descriptor.MediaType = mediaType
@@ -121,7 +136,7 @@ func (s *distributionRouter) getDistributionInfo(ctx context.Context, w http.Res
 	switch mnfstObj := mnfst.(type) {
 	case *manifestlist.DeserializedManifestList:
 		for _, m := range mnfstObj.Manifests {
-			distributionInspect.Platforms = append(distributionInspect.Platforms, v1.Platform{
+			distributionInspect.Platforms = append(distributionInspect.Platforms, ocispec.Platform{
 				Architecture: m.Platform.Architecture,
 				OS:           m.Platform.OS,
 				OSVersion:    m.Platform.OSVersion,
@@ -130,8 +145,9 @@ func (s *distributionRouter) getDistributionInfo(ctx context.Context, w http.Res
 			})
 		}
 	case *schema2.DeserializedManifest:
-		configJSON, err := blobsrvc.Get(ctx, mnfstObj.Config.Digest)
-		var platform v1.Platform
+		blobStore := distrepo.Blobs(ctx)
+		configJSON, err := blobStore.Get(ctx, mnfstObj.Config.Digest)
+		var platform ocispec.Platform
 		if err == nil {
 			err := json.Unmarshal(configJSON, &platform)
 			if err == nil && (platform.OS != "" || platform.Architecture != "") {
@@ -139,12 +155,14 @@ func (s *distributionRouter) getDistributionInfo(ctx context.Context, w http.Res
 			}
 		}
 	case *schema1.SignedManifest:
-		platform := v1.Platform{
+		if os.Getenv("DOCKER_ENABLE_DEPRECATED_PULL_SCHEMA_1_IMAGE") == "" {
+			return registry.DistributionInspect{}, distributionpkg.DeprecatedSchema1ImageError(namedRef)
+		}
+		platform := ocispec.Platform{
 			Architecture: mnfstObj.Architecture,
 			OS:           "linux",
 		}
 		distributionInspect.Platforms = append(distributionInspect.Platforms, platform)
 	}
-
-	return httputils.WriteJSON(w, http.StatusOK, distributionInspect)
+	return distributionInspect, nil
 }

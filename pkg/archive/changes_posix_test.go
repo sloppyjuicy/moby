@@ -1,4 +1,4 @@
-package archive // import "github.com/docker/docker/pkg/archive"
+package archive
 
 import (
 	"archive/tar"
@@ -8,6 +8,8 @@ import (
 	"path"
 	"sort"
 	"testing"
+
+	"github.com/docker/docker/pkg/idtools"
 )
 
 func TestHardLinkOrder(t *testing.T) {
@@ -22,12 +24,8 @@ func TestHardLinkOrder(t *testing.T) {
 	defer os.RemoveAll(src)
 	for _, name := range names {
 		func() {
-			fh, err := os.Create(path.Join(src, name))
+			err := os.WriteFile(path.Join(src, name), msg, 0o666)
 			if err != nil {
-				t.Fatal(err)
-			}
-			defer fh.Close()
-			if _, err = fh.Write(msg); err != nil {
 				t.Fatal(err)
 			}
 		}()
@@ -60,7 +58,7 @@ func TestHardLinkOrder(t *testing.T) {
 	sort.Sort(changesByPath(changes))
 
 	// ExportChanges
-	ar, err := ExportChanges(dest, changes, nil, nil)
+	ar, err := ExportChanges(dest, changes, idtools.IdentityMapping{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +70,7 @@ func TestHardLinkOrder(t *testing.T) {
 	// reverse sort
 	sort.Sort(sort.Reverse(changesByPath(changes)))
 	// ExportChanges
-	arRev, err := ExportChanges(dest, changes, nil, nil)
+	arRev, err := ExportChanges(dest, changes, idtools.IdentityMapping{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +98,6 @@ func TestHardLinkOrder(t *testing.T) {
 			t.Errorf("headers - %q expected linkname %q; but got %q", hdrs[i].Name, hdrs[i].Linkname, hdrsRev[i].Linkname)
 		}
 	}
-
 }
 
 type tarHeaders []tar.Header

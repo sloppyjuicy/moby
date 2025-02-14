@@ -1,18 +1,21 @@
 //go:build linux
-// +build linux
 
 package ipvlan
 
 import (
+	"context"
 	"fmt"
 	"net"
 
+	"github.com/containerd/log"
 	"github.com/docker/docker/libnetwork/driverapi"
+	"github.com/docker/docker/libnetwork/netlabel"
 	"github.com/docker/docker/libnetwork/netutils"
 	"github.com/docker/docker/libnetwork/ns"
-	"github.com/docker/docker/libnetwork/osl"
 	"github.com/docker/docker/libnetwork/types"
-	"github.com/sirupsen/logrus"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type staticRoute struct {
@@ -27,8 +30,13 @@ const (
 )
 
 // Join method is invoked when a Sandbox is attached to an endpoint.
-func (d *driver) Join(nid, eid string, sboxKey string, jinfo driverapi.JoinInfo, options map[string]interface{}) error {
-	defer osl.InitOSContext()()
+func (d *driver) Join(ctx context.Context, nid, eid string, sboxKey string, jinfo driverapi.JoinInfo, epOpts, _ map[string]interface{}) error {
+	ctx, span := otel.Tracer("").Start(ctx, "libnetwork.drivers.ipvlan.Join", trace.WithAttributes(
+		attribute.String("nid", nid),
+		attribute.String("eid", eid),
+		attribute.String("sboxKey", sboxKey)))
+	defer span.End()
+
 	n, err := d.getNetwork(nid)
 	if err != nil {
 		return err
@@ -43,7 +51,7 @@ func (d *driver) Join(nid, eid string, sboxKey string, jinfo driverapi.JoinInfo,
 		return fmt.Errorf("error generating an interface name: %v", err)
 	}
 	// create the netlink ipvlan interface
-	vethName, err := createIPVlan(containerIfName, n.config.Parent, n.config.IpvlanMode)
+	vethName, err := createIPVlan(containerIfName, n.config.Parent, n.config.IpvlanMode, n.config.IpvlanFlag)
 	if err != nil {
 		return err
 	}
@@ -54,18 +62,21 @@ func (d *driver) Join(nid, eid string, sboxKey string, jinfo driverapi.JoinInfo,
 		return fmt.Errorf("could not find endpoint with id %s", eid)
 	}
 	if !n.config.Internal {
-		if n.config.IpvlanMode == modeL3 {
+		switch n.config.IpvlanMode {
+		case modeL3, modeL3S:
 			// disable gateway services to add a default gw using dev eth0 only
 			jinfo.DisableGatewayService()
-			defaultRoute, err := ifaceGateway(defaultV4RouteCidr)
-			if err != nil {
-				return err
+			if ep.addr != nil {
+				defaultRoute, err := ifaceGateway(defaultV4RouteCidr)
+				if err != nil {
+					return err
+				}
+				if err := jinfo.AddStaticRoute(defaultRoute.Destination, defaultRoute.RouteType, defaultRoute.NextHop); err != nil {
+					return fmt.Errorf("failed to set an ipvlan l3/l3s mode ipv4 default gateway: %v", err)
+				}
+				log.G(ctx).Debugf("Ipvlan Endpoint Joined with IPv4_Addr: %s, Ipvlan_Mode: %s, Parent: %s",
+					ep.addr.IP.String(), n.config.IpvlanMode, n.config.Parent)
 			}
-			if err := jinfo.AddStaticRoute(defaultRoute.Destination, defaultRoute.RouteType, defaultRoute.NextHop); err != nil {
-				return fmt.Errorf("failed to set an ipvlan l3 mode ipv4 default gateway: %v", err)
-			}
-			logrus.Debugf("Ipvlan Endpoint Joined with IPv4_Addr: %s, Ipvlan_Mode: %s, Parent: %s",
-				ep.addr.IP.String(), n.config.IpvlanMode, n.config.Parent)
 			// If the endpoint has a v6 address, set a v6 default route
 			if ep.addrv6 != nil {
 				default6Route, err := ifaceGateway(defaultV6RouteCidr)
@@ -73,13 +84,12 @@ func (d *driver) Join(nid, eid string, sboxKey string, jinfo driverapi.JoinInfo,
 					return err
 				}
 				if err = jinfo.AddStaticRoute(default6Route.Destination, default6Route.RouteType, default6Route.NextHop); err != nil {
-					return fmt.Errorf("failed to set an ipvlan l3 mode ipv6 default gateway: %v", err)
+					return fmt.Errorf("failed to set an ipvlan l3/l3s mode ipv6 default gateway: %v", err)
 				}
-				logrus.Debugf("Ipvlan Endpoint Joined with IPv6_Addr: %s, Ipvlan_Mode: %s, Parent: %s",
+				log.G(ctx).Debugf("Ipvlan Endpoint Joined with IPv6_Addr: %s, Ipvlan_Mode: %s, Parent: %s",
 					ep.addrv6.IP.String(), n.config.IpvlanMode, n.config.Parent)
 			}
-		}
-		if n.config.IpvlanMode == modeL2 {
+		case modeL2:
 			// parse and correlate the endpoint v4 address with the available v4 subnets
 			if len(n.config.Ipv4Subnets) > 0 {
 				s := n.getSubnetforIPv4(ep.addr)
@@ -94,7 +104,7 @@ func (d *driver) Join(nid, eid string, sboxKey string, jinfo driverapi.JoinInfo,
 				if err != nil {
 					return err
 				}
-				logrus.Debugf("Ipvlan Endpoint Joined with IPv4_Addr: %s, Gateway: %s, Ipvlan_Mode: %s, Parent: %s",
+				log.G(ctx).Debugf("Ipvlan Endpoint Joined with IPv4_Addr: %s, Gateway: %s, Ipvlan_Mode: %s, Parent: %s",
 					ep.addr.IP.String(), v4gw.String(), n.config.IpvlanMode, n.config.Parent)
 			}
 			// parse and correlate the endpoint v6 address with the available v6 subnets
@@ -111,22 +121,30 @@ func (d *driver) Join(nid, eid string, sboxKey string, jinfo driverapi.JoinInfo,
 				if err != nil {
 					return err
 				}
-				logrus.Debugf("Ipvlan Endpoint Joined with IPv6_Addr: %s, Gateway: %s, Ipvlan_Mode: %s, Parent: %s",
+				log.G(ctx).Debugf("Ipvlan Endpoint Joined with IPv6_Addr: %s, Gateway: %s, Ipvlan_Mode: %s, Parent: %s",
 					ep.addrv6.IP.String(), v6gw.String(), n.config.IpvlanMode, n.config.Parent)
+			}
+			if len(n.config.Ipv4Subnets) == 0 && len(n.config.Ipv6Subnets) == 0 {
+				// With no addresses, don't need a gateway.
+				jinfo.DisableGatewayService()
 			}
 		}
 	} else {
 		if len(n.config.Ipv4Subnets) > 0 {
-			logrus.Debugf("Ipvlan Endpoint Joined with IPv4_Addr: %s, IpVlan_Mode: %s, Parent: %s",
+			log.G(ctx).Debugf("Ipvlan Endpoint Joined with IPv4_Addr: %s, IpVlan_Mode: %s, Parent: %s",
 				ep.addr.IP.String(), n.config.IpvlanMode, n.config.Parent)
 		}
 		if len(n.config.Ipv6Subnets) > 0 {
-			logrus.Debugf("Ipvlan Endpoint Joined with IPv6_Addr: %s IpVlan_Mode: %s, Parent: %s",
+			log.G(ctx).Debugf("Ipvlan Endpoint Joined with IPv6_Addr: %s IpVlan_Mode: %s, Parent: %s",
 				ep.addrv6.IP.String(), n.config.IpvlanMode, n.config.Parent)
 		}
+		// If n.config.Internal was set locally by the driver because there's no parent
+		// interface, libnetwork doesn't know the network is internal. So, stop it from
+		// adding a gateway endpoint.
+		jinfo.DisableGatewayService()
 	}
 	iNames := jinfo.InterfaceName()
-	err = iNames.SetNames(vethName, containerVethPrefix)
+	err = iNames.SetNames(vethName, containerVethPrefix, netlabel.GetIfname(epOpts))
 	if err != nil {
 		return err
 	}
@@ -139,7 +157,6 @@ func (d *driver) Join(nid, eid string, sboxKey string, jinfo driverapi.JoinInfo,
 
 // Leave method is invoked when a Sandbox detaches from an endpoint.
 func (d *driver) Leave(nid, eid string) error {
-	defer osl.InitOSContext()()
 	network, err := d.getNetwork(nid)
 	if err != nil {
 		return err
@@ -171,29 +188,17 @@ func ifaceGateway(dfNet string) (*staticRoute, error) {
 }
 
 // getSubnetforIPv4 returns the ipv4 subnet to which the given IP belongs
-func (n *network) getSubnetforIPv4(ip *net.IPNet) *ipv4Subnet {
-	for _, s := range n.config.Ipv4Subnets {
-		_, snet, err := net.ParseCIDR(s.SubnetIP)
-		if err != nil {
-			return nil
-		}
-		// first check if the mask lengths are the same
-		i, _ := snet.Mask.Size()
-		j, _ := ip.Mask.Size()
-		if i != j {
-			continue
-		}
-		if snet.Contains(ip.IP) {
-			return s
-		}
-	}
-
-	return nil
+func (n *network) getSubnetforIPv4(ip *net.IPNet) *ipSubnet {
+	return getSubnetForIP(ip, n.config.Ipv4Subnets)
 }
 
 // getSubnetforIPv6 returns the ipv6 subnet to which the given IP belongs
-func (n *network) getSubnetforIPv6(ip *net.IPNet) *ipv6Subnet {
-	for _, s := range n.config.Ipv6Subnets {
+func (n *network) getSubnetforIPv6(ip *net.IPNet) *ipSubnet {
+	return getSubnetForIP(ip, n.config.Ipv6Subnets)
+}
+
+func getSubnetForIP(ip *net.IPNet, subnets []*ipSubnet) *ipSubnet {
+	for _, s := range subnets {
 		_, snet, err := net.ParseCIDR(s.SubnetIP)
 		if err != nil {
 			return nil

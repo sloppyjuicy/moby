@@ -1,19 +1,16 @@
 package cacheimport
 
 import (
+	"context"
 	"fmt"
 	"sort"
 
-	"github.com/moby/buildkit/exporter/containerimage/exptypes"
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/moby/buildkit/solver"
+	"github.com/moby/buildkit/util/bklog"
 	digest "github.com/opencontainers/go-digest"
 	"github.com/pkg/errors"
-	"github.com/sirupsen/logrus"
 )
-
-// EmptyLayerRemovalSupported defines if implementation supports removal of empty layers. Buildkit image exporter
-// removes empty layers, but moby layerstore based implementation does not.
-var EmptyLayerRemovalSupported = true
 
 // sortConfig sorts the config structure to make sure it is deterministic
 func sortConfig(cc *CacheConfig) {
@@ -131,7 +128,7 @@ type normalizeState struct {
 	next  int
 }
 
-func (s *normalizeState) removeLoops() {
+func (s *normalizeState) removeLoops(ctx context.Context) {
 	roots := []digest.Digest{}
 	for dgst, it := range s.byKey {
 		if len(it.links) == 0 {
@@ -142,11 +139,11 @@ func (s *normalizeState) removeLoops() {
 	visited := map[digest.Digest]struct{}{}
 
 	for _, d := range roots {
-		s.checkLoops(d, visited)
+		s.checkLoops(ctx, d, visited)
 	}
 }
 
-func (s *normalizeState) checkLoops(d digest.Digest, visited map[digest.Digest]struct{}) {
+func (s *normalizeState) checkLoops(ctx context.Context, d digest.Digest, visited map[digest.Digest]struct{}) {
 	it, ok := s.byKey[d]
 	if !ok {
 		return
@@ -168,11 +165,11 @@ func (s *normalizeState) checkLoops(d digest.Digest, visited map[digest.Digest]s
 					continue
 				}
 				if !it2.removeLink(it) {
-					logrus.Warnf("failed to remove looping cache key %s %s", d, id)
+					bklog.G(ctx).Warnf("failed to remove looping cache key %s %s", d, id)
 				}
 				delete(links[l], id)
 			} else {
-				s.checkLoops(id, visited)
+				s.checkLoops(ctx, id, visited)
 			}
 		}
 	}
@@ -277,23 +274,30 @@ type marshalState struct {
 	recordsByItem map[*item]int
 }
 
-func marshalRemote(r *solver.Remote, state *marshalState) string {
+func marshalRemote(ctx context.Context, r *solver.Remote, state *marshalState) string {
 	if len(r.Descriptors) == 0 {
 		return ""
 	}
+
+	if r.Provider != nil {
+		for _, d := range r.Descriptors {
+			if _, err := r.Provider.Info(ctx, d.Digest); err != nil {
+				if !cerrdefs.IsNotImplemented(err) {
+					return ""
+				}
+			}
+		}
+	}
+
 	var parentID string
 	if len(r.Descriptors) > 1 {
 		r2 := &solver.Remote{
 			Descriptors: r.Descriptors[:len(r.Descriptors)-1],
 			Provider:    r.Provider,
 		}
-		parentID = marshalRemote(r2, state)
+		parentID = marshalRemote(ctx, r2, state)
 	}
 	desc := r.Descriptors[len(r.Descriptors)-1]
-
-	if desc.Digest == exptypes.EmptyGZLayer && EmptyLayerRemovalSupported {
-		return parentID
-	}
 
 	state.descriptors[desc.Digest] = DescriptorProviderPair{
 		Descriptor: desc,
@@ -318,7 +322,7 @@ func marshalRemote(r *solver.Remote, state *marshalState) string {
 	return id
 }
 
-func marshalItem(it *item, state *marshalState) error {
+func marshalItem(ctx context.Context, it *item, state *marshalState) error {
 	if _, ok := state.recordsByItem[it]; ok {
 		return nil
 	}
@@ -330,7 +334,7 @@ func marshalItem(it *item, state *marshalState) error {
 
 	for i, m := range it.links {
 		for l := range m {
-			if err := marshalItem(l.src, state); err != nil {
+			if err := marshalItem(ctx, l.src, state); err != nil {
 				return err
 			}
 			idx, ok := state.recordsByItem[l.src]
@@ -345,7 +349,7 @@ func marshalItem(it *item, state *marshalState) error {
 	}
 
 	if it.result != nil {
-		id := marshalRemote(it.result, state)
+		id := marshalRemote(ctx, it.result, state)
 		if id != "" {
 			idx, ok := state.chainsByID[id]
 			if !ok {

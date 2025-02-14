@@ -7,7 +7,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/docker/docker/api/types"
+	"github.com/containerd/log"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/network"
 	swarmtypes "github.com/docker/docker/api/types/swarm"
@@ -17,14 +17,13 @@ import (
 	clustertypes "github.com/docker/docker/daemon/cluster/provider"
 	"github.com/docker/docker/libnetwork"
 	networktypes "github.com/docker/docker/libnetwork/types"
-	"github.com/docker/swarmkit/agent"
-	"github.com/docker/swarmkit/agent/exec"
-	"github.com/docker/swarmkit/api"
-	"github.com/docker/swarmkit/api/naming"
-	"github.com/docker/swarmkit/log"
-	"github.com/docker/swarmkit/template"
+	"github.com/moby/swarmkit/v2/agent"
+	"github.com/moby/swarmkit/v2/agent/exec"
+	"github.com/moby/swarmkit/v2/api"
+	"github.com/moby/swarmkit/v2/api/naming"
+	swarmlog "github.com/moby/swarmkit/v2/log"
+	"github.com/moby/swarmkit/v2/template"
 	"github.com/pkg/errors"
-	"github.com/sirupsen/logrus"
 )
 
 type executor struct {
@@ -52,13 +51,16 @@ func NewExecutor(b executorpkg.Backend, p plugin.Backend, i executorpkg.ImageBac
 		pluginBackend: p,
 		imageBackend:  i,
 		volumeBackend: v,
-		dependencies:  agent.NewDependencyManager(b.PluginGetter()),
+		dependencies:  agent.NewDependencyManager(convert.SwarmPluginGetter(b.PluginGetter())),
 	}
 }
 
 // Describe returns the underlying node description from the docker client.
 func (e *executor) Describe(ctx context.Context) (*api.NodeDescription, error) {
-	info := e.backend.SystemInfo()
+	info, err := e.backend.SystemInfo(ctx)
+	if err != nil {
+		return nil, err
+	}
 
 	plugins := map[api.PluginDescription]struct{}{}
 	addPlugins := func(typ string, names []string) {
@@ -114,13 +116,16 @@ func (e *executor) Describe(ctx context.Context) (*api.NodeDescription, error) {
 	// parse []string labels into a map[string]string
 	labels := map[string]string{}
 	for _, l := range info.Labels {
-		stringSlice := strings.SplitN(l, "=", 2)
+		k, v, ok := strings.Cut(l, "=")
 		// this will take the last value in the list for a given key
 		// ideally, one shouldn't assign multiple values to the same key
-		if len(stringSlice) > 1 {
-			labels[stringSlice[0]] = stringSlice[1]
+		if ok {
+			labels[k] = v
 		}
 	}
+
+	// TODO(dperny): don't ignore the error here
+	csiInfo, _ := e.Volumes().Plugins().NodeInfo(ctx)
 
 	description := &api.NodeDescription{
 		Hostname: info.Name,
@@ -138,6 +143,7 @@ func (e *executor) Describe(ctx context.Context) (*api.NodeDescription, error) {
 			MemoryBytes: info.MemTotal,
 			Generic:     convert.GenericResourcesToGRPC(info.GenericResources),
 		},
+		CSIInfo: csiInfo,
 	}
 
 	// Save the node information in the executor field
@@ -156,8 +162,7 @@ func (e *executor) Configure(ctx context.Context, node *api.Node) error {
 		if na == nil || na.Network == nil || len(na.Addresses) == 0 {
 			// this should not happen, but we got a panic here and don't have a
 			// good idea about what the underlying data structure looks like.
-			logrus.WithField("NetworkAttachment", fmt.Sprintf("%#v", na)).
-				Warnf("skipping nil or malformed node network attachment entry")
+			swarmlog.G(ctx).WithField("NetworkAttachment", fmt.Sprintf("%#v", na)).Warn("skipping nil or malformed node network attachment entry")
 			continue
 		}
 
@@ -188,8 +193,7 @@ func (e *executor) Configure(ctx context.Context, node *api.Node) error {
 			// same thing as above, check sanity of the attachments so we don't
 			// get a panic.
 			if na == nil || na.Network == nil || len(na.Addresses) == 0 {
-				logrus.WithField("NetworkAttachment", fmt.Sprintf("%#v", na)).
-					Warnf("skipping nil or malformed node network attachment entry")
+				swarmlog.G(ctx).WithField("NetworkAttachment", fmt.Sprintf("%#v", na)).Warn("skipping nil or malformed node network attachment entry")
 				continue
 			}
 
@@ -212,14 +216,13 @@ func (e *executor) Configure(ctx context.Context, node *api.Node) error {
 		return e.backend.GetAttachmentStore().ResetAttachments(attachments)
 	}
 
-	options := types.NetworkCreate{
+	options := network.CreateOptions{
 		Driver: ingressNA.Network.DriverState.Name,
 		IPAM: &network.IPAM{
 			Driver: ingressNA.Network.IPAM.Driver.Name,
 		},
-		Options:        ingressNA.Network.DriverState.Options,
-		Ingress:        true,
-		CheckDuplicate: true,
+		Options: ingressNA.Network.DriverState.Options,
+		Ingress: true,
 	}
 
 	for _, ic := range ingressNA.Network.IPAM.Configs {
@@ -233,9 +236,9 @@ func (e *executor) Configure(ctx context.Context, node *api.Node) error {
 
 	_, err := e.backend.SetupIngress(clustertypes.NetworkCreateRequest{
 		ID: ingressNA.Network.ID,
-		NetworkCreateRequest: types.NetworkCreateRequest{
+		CreateRequest: network.CreateRequest{
 			Name:          ingressNA.Network.Spec.Annotations.Name,
-			NetworkCreate: options,
+			CreateOptions: options,
 		},
 	}, ingressNA.Addresses[0])
 	if err != nil {
@@ -258,19 +261,16 @@ func (e *executor) Configure(ctx context.Context, node *api.Node) error {
 			// just to log an appropriate, informative error. i'm unsure if
 			// this can ever actually occur, but we need to know if it does.
 			if gone {
-				log.G(ctx).Warnf("network %s should be removed, but still has active attachments", nw)
+				swarmlog.G(ctx).Warnf("network %s should be removed, but still has active attachments", nw)
 			} else {
-				log.G(ctx).Warnf(
-					"network %s should have its node LB IP changed, but cannot be removed because of active attachments",
-					nw,
-				)
+				swarmlog.G(ctx).Warnf("network %s should have its node LB IP changed, but cannot be removed because of active attachments", nw)
 			}
 			continue
 		case errors.As(err, &errNoSuchNetwork):
 			// NoSuchNetworkError indicates the network is already gone.
 			continue
 		default:
-			log.G(ctx).Errorf("network %s remove failed: %v", nw, err)
+			swarmlog.G(ctx).Errorf("network %s remove failed: %v", nw, err)
 		}
 	}
 
@@ -297,7 +297,7 @@ func (e *executor) Controller(t *api.Task) (exec.Controller, error) {
 	var ctlr exec.Controller
 	switch r := t.Spec.GetRuntime().(type) {
 	case *api.TaskSpec_Generic:
-		logrus.WithFields(logrus.Fields{
+		swarmlog.G(context.TODO()).WithFields(log.Fields{
 			"kind":     r.Generic.Kind,
 			"type_url": r.Generic.Payload.TypeUrl,
 		}).Debug("custom runtime requested")
@@ -354,6 +354,10 @@ func (e *executor) Secrets() exec.SecretsManager {
 
 func (e *executor) Configs() exec.ConfigsManager {
 	return e.dependencies.Configs()
+}
+
+func (e *executor) Volumes() exec.VolumesManager {
+	return e.dependencies.Volumes()
 }
 
 type sortedPlugins []api.PluginDescription

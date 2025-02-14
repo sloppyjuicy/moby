@@ -1,7 +1,6 @@
 package service // import "github.com/docker/docker/volume/service"
 
 import (
-	"fmt"
 	"strings"
 )
 
@@ -64,6 +63,11 @@ func (e *OpErr) Cause() error {
 	return e.Err
 }
 
+// Unwrap returns the error the caused this error
+func (e *OpErr) Unwrap() error {
+	return e.Err
+}
+
 // IsInUse returns a boolean indicating whether the error indicates that a
 // volume is in use
 func IsInUse(err error) bool {
@@ -85,27 +89,18 @@ type causal interface {
 	Cause() error
 }
 
+type wrapErr interface {
+	Unwrap() error
+}
+
 func isErr(err error, expected error) bool {
 	switch pe := err.(type) {
 	case nil:
 		return false
+	case wrapErr:
+		return isErr(pe.Unwrap(), expected)
 	case causal:
 		return isErr(pe.Cause(), expected)
 	}
 	return err == expected
 }
-
-type invalidFilter struct {
-	filter string
-	value  interface{}
-}
-
-func (e invalidFilter) Error() string {
-	msg := "Invalid filter '" + e.filter
-	if e.value != nil {
-		msg += fmt.Sprintf("=%s", e.value)
-	}
-	return msg + "'"
-}
-
-func (e invalidFilter) InvalidParameter() {}

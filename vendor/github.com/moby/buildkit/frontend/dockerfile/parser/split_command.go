@@ -13,7 +13,6 @@ func splitCommand(line string) (string, []string, string, error) {
 
 	// Make sure we get the same results irrespective of leading/trailing spaces
 	cmdline := reWhitespace.Split(strings.TrimSpace(line), 2)
-	cmd := strings.ToLower(cmdline[0])
 
 	if len(cmdline) == 2 {
 		var err error
@@ -23,7 +22,7 @@ func splitCommand(line string) (string, []string, string, error) {
 		}
 	}
 
-	return cmd, flags, strings.TrimSpace(args), nil
+	return cmdline[0], flags, strings.TrimSpace(args), nil
 }
 
 func extractBuilderFlags(line string) (string, []string, error) {
@@ -37,7 +36,7 @@ func extractBuilderFlags(line string) (string, []string, error) {
 
 	words := []string{}
 	phase := inSpaces
-	word := ""
+	sbuilder := &strings.Builder{}
 	quote := '\000'
 	blankOK := false
 	var ch rune
@@ -63,13 +62,14 @@ func extractBuilderFlags(line string) (string, []string, error) {
 			phase = inWord // found something with "--", fall through
 		}
 		if (phase == inWord || phase == inQuote) && (pos == len(line)) {
-			if word != "--" && (blankOK || len(word) > 0) {
+			if word := sbuilder.String(); word != "--" && (blankOK || len(word) > 0) {
 				words = append(words, word)
 			}
 			break
 		}
 		if phase == inWord {
 			if unicode.IsSpace(ch) {
+				word := sbuilder.String()
 				phase = inSpaces
 				if word == "--" {
 					return line[pos:], words, nil
@@ -77,7 +77,7 @@ func extractBuilderFlags(line string) (string, []string, error) {
 				if blankOK || len(word) > 0 {
 					words = append(words, word)
 				}
-				word = ""
+				sbuilder.Reset()
 				blankOK = false
 				continue
 			}
@@ -94,7 +94,9 @@ func extractBuilderFlags(line string) (string, []string, error) {
 				pos++
 				ch = rune(line[pos])
 			}
-			word += string(ch)
+			if _, err := sbuilder.WriteRune(ch); err != nil {
+				return "", nil, err
+			}
 			continue
 		}
 		if phase == inQuote {
@@ -110,7 +112,9 @@ func extractBuilderFlags(line string) (string, []string, error) {
 				pos++
 				ch = rune(line[pos])
 			}
-			word += string(ch)
+			if _, err := sbuilder.WriteRune(ch); err != nil {
+				return "", nil, err
+			}
 		}
 	}
 

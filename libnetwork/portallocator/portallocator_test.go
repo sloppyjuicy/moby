@@ -1,34 +1,30 @@
 package portallocator
 
 import (
-	"fmt"
 	"net"
 	"testing"
+
+	"gotest.tools/v3/assert"
+	is "gotest.tools/v3/assert/cmp"
 )
 
-func resetPortAllocator() {
-	instance = newInstance()
-}
-
 func TestRequestNewPort(t *testing.T) {
-	p := Get()
-	defer resetPortAllocator()
+	p := newInstance()
 
-	port, err := p.RequestPort(defaultIP, "tcp", 0)
+	port, err := p.RequestPort(net.IPv4zero, "tcp", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if expected := p.Begin; port != expected {
+	if expected := p.begin; port != expected {
 		t.Fatalf("Expected port %d got %d", expected, port)
 	}
 }
 
 func TestRequestSpecificPort(t *testing.T) {
-	p := Get()
-	defer resetPortAllocator()
+	p := newInstance()
 
-	port, err := p.RequestPort(defaultIP, "tcp", 5000)
+	port, err := p.RequestPort(net.IPv4zero, "tcp", 5000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,9 +35,9 @@ func TestRequestSpecificPort(t *testing.T) {
 }
 
 func TestReleasePort(t *testing.T) {
-	p := Get()
+	p := newInstance()
 
-	port, err := p.RequestPort(defaultIP, "tcp", 5000)
+	port, err := p.RequestPort(net.IPv4zero, "tcp", 5000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,16 +45,13 @@ func TestReleasePort(t *testing.T) {
 		t.Fatalf("Expected port 5000 got %d", port)
 	}
 
-	if err := p.ReleasePort(defaultIP, "tcp", 5000); err != nil {
-		t.Fatal(err)
-	}
+	p.ReleasePort(net.IPv4zero, "tcp", 5000)
 }
 
 func TestReuseReleasedPort(t *testing.T) {
-	p := Get()
-	defer resetPortAllocator()
+	p := newInstance()
 
-	port, err := p.RequestPort(defaultIP, "tcp", 5000)
+	port, err := p.RequestPort(net.IPv4zero, "tcp", 5000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,11 +59,9 @@ func TestReuseReleasedPort(t *testing.T) {
 		t.Fatalf("Expected port 5000 got %d", port)
 	}
 
-	if err := p.ReleasePort(defaultIP, "tcp", 5000); err != nil {
-		t.Fatal(err)
-	}
+	p.ReleasePort(net.IPv4zero, "tcp", 5000)
 
-	port, err = p.RequestPort(defaultIP, "tcp", 5000)
+	port, err = p.RequestPort(net.IPv4zero, "tcp", 5000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,10 +71,9 @@ func TestReuseReleasedPort(t *testing.T) {
 }
 
 func TestReleaseUnreadledPort(t *testing.T) {
-	p := Get()
-	defer resetPortAllocator()
+	p := newInstance()
 
-	port, err := p.RequestPort(defaultIP, "tcp", 5000)
+	port, err := p.RequestPort(net.IPv4zero, "tcp", 5000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +81,7 @@ func TestReleaseUnreadledPort(t *testing.T) {
 		t.Fatalf("Expected port 5000 got %d", port)
 	}
 
-	_, err = p.RequestPort(defaultIP, "tcp", 5000)
+	_, err = p.RequestPort(net.IPv4zero, "tcp", 5000)
 
 	switch err.(type) {
 	case ErrPortAlreadyAllocated:
@@ -101,41 +91,40 @@ func TestReleaseUnreadledPort(t *testing.T) {
 }
 
 func TestUnknowProtocol(t *testing.T) {
-	if _, err := Get().RequestPort(defaultIP, "tcpp", 0); err != ErrUnknownProtocol {
+	p := newInstance()
+
+	if _, err := p.RequestPort(net.IPv4zero, "tcpp", 0); err != ErrUnknownProtocol {
 		t.Fatalf("Expected error %s got %s", ErrUnknownProtocol, err)
 	}
 }
 
 func TestAllocateAllPorts(t *testing.T) {
-	p := Get()
-	defer resetPortAllocator()
+	p := newInstance()
 
-	for i := 0; i <= p.End-p.Begin; i++ {
-		port, err := p.RequestPort(defaultIP, "tcp", 0)
+	for i := 0; i <= p.end-p.begin; i++ {
+		port, err := p.RequestPort(net.IPv4zero, "tcp", 0)
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		if expected := p.Begin + i; port != expected {
+		if expected := p.begin + i; port != expected {
 			t.Fatalf("Expected port %d got %d", expected, port)
 		}
 	}
 
-	if _, err := p.RequestPort(defaultIP, "tcp", 0); err != ErrAllPortsAllocated {
+	if _, err := p.RequestPort(net.IPv4zero, "tcp", 0); err != ErrAllPortsAllocated {
 		t.Fatalf("Expected error %s got %s", ErrAllPortsAllocated, err)
 	}
 
-	_, err := p.RequestPort(defaultIP, "udp", 0)
+	_, err := p.RequestPort(net.IPv4zero, "udp", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// release a port in the middle and ensure we get another tcp port
-	port := p.Begin + 5
-	if err := p.ReleasePort(defaultIP, "tcp", port); err != nil {
-		t.Fatal(err)
-	}
-	newPort, err := p.RequestPort(defaultIP, "tcp", 0)
+	port := p.begin + 5
+	p.ReleasePort(net.IPv4zero, "tcp", port)
+	newPort, err := p.RequestPort(net.IPv4zero, "tcp", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,10 +134,8 @@ func TestAllocateAllPorts(t *testing.T) {
 
 	// now pm.last == newPort, release it so that it's the only free port of
 	// the range, and ensure we get it back
-	if err := p.ReleasePort(defaultIP, "tcp", newPort); err != nil {
-		t.Fatal(err)
-	}
-	port, err = p.RequestPort(defaultIP, "tcp", 0)
+	p.ReleasePort(net.IPv4zero, "tcp", newPort)
+	port, err = p.RequestPort(net.IPv4zero, "tcp", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,29 +145,25 @@ func TestAllocateAllPorts(t *testing.T) {
 }
 
 func BenchmarkAllocatePorts(b *testing.B) {
-	p := Get()
-	defer resetPortAllocator()
+	p := newInstance()
 
 	for i := 0; i < b.N; i++ {
-		for i := 0; i <= p.End-p.Begin; i++ {
-			port, err := p.RequestPort(defaultIP, "tcp", 0)
+		for i := 0; i <= p.end-p.begin; i++ {
+			port, err := p.RequestPort(net.IPv4zero, "tcp", 0)
 			if err != nil {
 				b.Fatal(err)
 			}
 
-			if expected := p.Begin + i; port != expected {
+			if expected := p.begin + i; port != expected {
 				b.Fatalf("Expected port %d got %d", expected, port)
 			}
 		}
-		if err := p.ReleaseAll(); err != nil {
-			b.Fatal(err)
-		}
+		p.ReleaseAll()
 	}
 }
 
 func TestPortAllocation(t *testing.T) {
-	p := Get()
-	defer resetPortAllocator()
+	p := newInstance()
 
 	ip := net.ParseIP("192.168.0.1")
 	ip2 := net.ParseIP("192.168.0.2")
@@ -216,9 +199,7 @@ func TestPortAllocation(t *testing.T) {
 	if _, err := p.RequestPort(ip2, "tcp", 80); err == nil {
 		t.Fatalf("Acquiring a port already in use should return an error")
 	}
-	if err := p.ReleasePort(ip, "tcp", 80); err != nil {
-		t.Fatal(err)
-	}
+	p.ReleasePort(ip, "tcp", 80)
 	if _, err := p.RequestPort(ip, "tcp", 80); err != nil {
 		t.Fatal(err)
 	}
@@ -241,31 +222,30 @@ func TestPortAllocation(t *testing.T) {
 }
 
 func TestPortAllocationWithCustomRange(t *testing.T) {
-	p := Get()
-	defer resetPortAllocator()
+	p := newInstance()
 
 	start, end := 8081, 8082
 	specificPort := 8000
 
-	//get an ephemeral port.
-	port1, err := p.RequestPortInRange(defaultIP, "tcp", 0, 0)
+	// get an ephemeral port.
+	port1, err := p.RequestPortInRange(net.IPv4zero, "tcp", 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	//request invalid ranges
-	if _, err := p.RequestPortInRange(defaultIP, "tcp", 0, end); err == nil {
+	// request invalid ranges
+	if _, err := p.RequestPortInRange(net.IPv4zero, "tcp", 0, end); err == nil {
 		t.Fatalf("Expected error for invalid range %d-%d", 0, end)
 	}
-	if _, err := p.RequestPortInRange(defaultIP, "tcp", start, 0); err == nil {
+	if _, err := p.RequestPortInRange(net.IPv4zero, "tcp", start, 0); err == nil {
 		t.Fatalf("Expected error for invalid range %d-%d", 0, end)
 	}
-	if _, err := p.RequestPortInRange(defaultIP, "tcp", 8081, 8080); err == nil {
+	if _, err := p.RequestPortInRange(net.IPv4zero, "tcp", 8081, 8080); err == nil {
 		t.Fatalf("Expected error for invalid range %d-%d", 0, end)
 	}
 
-	//request a single port
-	port, err := p.RequestPortInRange(defaultIP, "tcp", specificPort, specificPort)
+	// request a single port
+	port, err := p.RequestPortInRange(net.IPv4zero, "tcp", specificPort, specificPort)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,24 +253,24 @@ func TestPortAllocationWithCustomRange(t *testing.T) {
 		t.Fatalf("Expected port %d, got %d", specificPort, port)
 	}
 
-	//get a port from the range
-	port2, err := p.RequestPortInRange(defaultIP, "tcp", start, end)
+	// get a port from the range
+	port2, err := p.RequestPortInRange(net.IPv4zero, "tcp", start, end)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if port2 < start || port2 > end {
 		t.Fatalf("Expected a port between %d and %d, got %d", start, end, port2)
 	}
-	//get another ephemeral port (should be > port1)
-	port3, err := p.RequestPortInRange(defaultIP, "tcp", 0, 0)
+	// get another ephemeral port (should be > port1)
+	port3, err := p.RequestPortInRange(net.IPv4zero, "tcp", 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if port3 < port1 {
 		t.Fatalf("Expected new port > %d in the ephemeral range, got %d", port1, port3)
 	}
-	//get another (and in this case the only other) port from the range
-	port4, err := p.RequestPortInRange(defaultIP, "tcp", start, end)
+	// get another (and in this case the only other) port from the range
+	port4, err := p.RequestPortInRange(net.IPv4zero, "tcp", start, end)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,69 +280,67 @@ func TestPortAllocationWithCustomRange(t *testing.T) {
 	if port4 == port2 {
 		t.Fatal("Allocated the same port from a custom range")
 	}
-	//request 3rd port from the range of 2
-	if _, err := p.RequestPortInRange(defaultIP, "tcp", start, end); err != ErrAllPortsAllocated {
+	// request 3rd port from the range of 2
+	if _, err := p.RequestPortInRange(net.IPv4zero, "tcp", start, end); err != ErrAllPortsAllocated {
 		t.Fatalf("Expected error %s got %s", ErrAllPortsAllocated, err)
 	}
 }
 
 func TestNoDuplicateBPR(t *testing.T) {
-	p := Get()
-	defer resetPortAllocator()
+	p := newInstance()
 
-	if port, err := p.RequestPort(defaultIP, "tcp", p.Begin); err != nil {
+	if port, err := p.RequestPort(net.IPv4zero, "tcp", p.begin); err != nil {
 		t.Fatal(err)
-	} else if port != p.Begin {
-		t.Fatalf("Expected port %d got %d", p.Begin, port)
+	} else if port != p.begin {
+		t.Fatalf("Expected port %d got %d", p.begin, port)
 	}
 
-	if port, err := p.RequestPort(defaultIP, "tcp", 0); err != nil {
+	if port, err := p.RequestPort(net.IPv4zero, "tcp", 0); err != nil {
 		t.Fatal(err)
-	} else if port == p.Begin {
+	} else if port == p.begin {
 		t.Fatalf("Acquire(0) allocated the same port twice: %d", port)
 	}
 }
 
-func TestChangePortRange(t *testing.T) {
-	var tests = []struct {
-		begin  int
-		end    int
-		setErr error
-		reqRlt int
-	}{
-		{defaultPortRangeEnd + 1, defaultPortRangeEnd + 10, fmt.Errorf("begin out of range"), 0},
-		{defaultPortRangeStart - 10, defaultPortRangeStart - 1, fmt.Errorf("end out of range"), 0},
-		{defaultPortRangeEnd, defaultPortRangeStart, fmt.Errorf("out of order"), 0},
-		{defaultPortRangeStart + 100, defaultPortRangeEnd + 10, nil, defaultPortRangeStart + 100},
-		{0, 0, nil, defaultPortRangeStart}, // revert to default if no value given
-		{defaultPortRangeStart - 100, defaultPortRangeEnd, nil, defaultPortRangeStart + 1},
-	}
-	p := Get()
-	port := 0
-	for _, c := range tests {
-		t.Logf("test: port allocate range %v-%v, setErr=%v, reqPort=%v",
-			c.begin, c.end, c.setErr, c.reqRlt)
-		err := p.SetPortRange(c.begin, c.end)
-		if (c.setErr == nil && c.setErr != err) ||
-			(c.setErr != nil && err == nil) {
-			t.Fatalf("Unexpected set range result, expected=%v, actual=%v", c.setErr, err)
-		}
-		if err != nil {
-			continue
-		}
-		if port > 0 {
-			err := p.ReleasePort(defaultIP, "tcp", port)
-			if err != nil {
-				t.Fatalf("Releasing port %v failed, err=%v", port, err)
-			}
-		}
+func TestRequestPortForMultipleIPs(t *testing.T) {
+	p := newInstance()
 
-		port, err = p.RequestPort(defaultIP, "tcp", 0)
-		if err != nil {
-			t.Fatalf("Request failed, err %v", err)
-		}
-		if port != c.reqRlt {
-			t.Fatalf("Incorrect port returned, expected=%v, actual=%v", c.reqRlt, port)
-		}
+	addrs := []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::")}
+
+	// Default port range.
+	port, err := p.RequestPortsInRange(addrs, "tcp", 0, 0)
+	assert.Check(t, err)
+	assert.Check(t, is.Equal(port, p.begin))
+
+	// Single-port range.
+	port, err = p.RequestPortsInRange(addrs, "tcp", 10000, 10000)
+	assert.Check(t, err)
+	assert.Check(t, is.Equal(port, 10000))
+
+	// Same single-port range, expect an error.
+	_, err = p.RequestPortsInRange(addrs, "tcp", 10000, 10000)
+	assert.Check(t, is.Error(err, "Bind for 127.0.0.1:10000 failed: port is already allocated"))
+
+	// Release the port from one address.
+	p.ReleasePort(addrs[0], "tcp", 10000)
+
+	// Same single-port range, still expect an error because the port's still held
+	// for the second address.
+	_, err = p.RequestPortsInRange(addrs, "tcp", 10000, 10000)
+	assert.Check(t, is.Error(err, "Bind for :::10000 failed: port is already allocated"))
+
+	// Release the port from the other address.
+	p.ReleasePort(addrs[1], "tcp", 10000)
+
+	// Should now be able to re-allocate the port.
+	port, err = p.RequestPortsInRange(addrs, "tcp", 10000, 10000)
+	assert.Check(t, err)
+	assert.Check(t, is.Equal(port, 10000))
+
+	// Multi-port range.
+	for i := 20000; i < 20004; i += 1 {
+		port, err = p.RequestPortsInRange(addrs, "tcp", 20000, 20004)
+		assert.Check(t, err)
+		assert.Check(t, is.Equal(port, i))
 	}
 }

@@ -2,19 +2,26 @@ package oci
 
 import (
 	"context"
+	"os"
 	"path"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 
-	"github.com/containerd/containerd/containers"
-	"github.com/containerd/containerd/mount"
-	"github.com/containerd/containerd/namespaces"
-	"github.com/containerd/containerd/oci"
-	"github.com/containerd/continuity/fs"
+	"github.com/containerd/containerd/v2/core/containers"
+	"github.com/containerd/containerd/v2/core/mount"
+	"github.com/containerd/containerd/v2/pkg/namespaces"
+	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/docker/docker/pkg/idtools"
-	"github.com/mitchellh/hashstructure"
+	"github.com/mitchellh/hashstructure/v2"
 	"github.com/moby/buildkit/executor"
 	"github.com/moby/buildkit/snapshot"
+	"github.com/moby/buildkit/solver/llbsolver/cdidevices"
 	"github.com/moby/buildkit/util/network"
+	rootlessmountopts "github.com/moby/buildkit/util/rootless/mountopts"
+	traceexec "github.com/moby/buildkit/util/tracing/exec"
+	"github.com/moby/sys/userns"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/opencontainers/selinux/go-selinux"
 	"github.com/pkg/errors"
@@ -32,13 +39,44 @@ const (
 	NoProcessSandbox
 )
 
+var tracingEnvVars = []string{
+	"OTEL_TRACES_EXPORTER=otlp",
+	"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=" + getTracingSocket(),
+	"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=grpc",
+}
+
+func (pm ProcessMode) String() string {
+	switch pm {
+	case ProcessSandbox:
+		return "sandbox"
+	case NoProcessSandbox:
+		return "no-sandbox"
+	default:
+		return ""
+	}
+}
+
 // Ideally we don't have to import whole containerd just for the default spec
 
 // GenerateSpec generates spec using containerd functionality.
 // opts are ignored for s.Process, s.Hostname, and s.Mounts .
-func GenerateSpec(ctx context.Context, meta executor.Meta, mounts []executor.Mount, id, resolvConf, hostsFile string, namespace network.Namespace, processMode ProcessMode, idmap *idtools.IdentityMapping, apparmorProfile string, opts ...oci.SpecOpts) (*specs.Spec, func(), error) {
+func GenerateSpec(ctx context.Context, meta executor.Meta, mounts []executor.Mount, id, resolvConf, hostsFile string, namespace network.Namespace, cgroupParent string, processMode ProcessMode, idmap *idtools.IdentityMapping, apparmorProfile string, selinuxB bool, tracingSocket string, cdiManager *cdidevices.Manager, opts ...oci.SpecOpts) (*specs.Spec, func(), error) {
 	c := &containers.Container{
 		ID: id,
+	}
+
+	if len(meta.CgroupParent) > 0 {
+		cgroupParent = meta.CgroupParent
+	}
+	if cgroupParent != "" {
+		var cgroupsPath string
+		lastSeparator := cgroupParent[len(cgroupParent)-1:]
+		if strings.Contains(cgroupParent, ".slice") && lastSeparator == ":" {
+			cgroupsPath = cgroupParent + id
+		} else {
+			cgroupsPath = filepath.Join("/", cgroupParent, "buildkit", id)
+		}
+		opts = append(opts, oci.WithCgroup(cgroupsPath))
 	}
 
 	// containerd/oci.GenerateSpec requires a namespace, which
@@ -47,13 +85,9 @@ func GenerateSpec(ctx context.Context, meta executor.Meta, mounts []executor.Mou
 		ctx = namespaces.WithNamespace(ctx, "buildkit")
 	}
 
-	if mountOpts, err := generateMountOpts(resolvConf, hostsFile); err == nil {
-		opts = append(opts, mountOpts...)
-	} else {
-		return nil, nil, err
-	}
+	opts = append(opts, generateMountOpts(resolvConf, hostsFile)...)
 
-	if securityOpts, err := generateSecurityOpts(meta.SecurityMode, apparmorProfile); err == nil {
+	if securityOpts, err := generateSecurityOpts(meta.SecurityMode, apparmorProfile, selinuxB); err == nil {
 		opts = append(opts, securityOpts...)
 	} else {
 		return nil, nil, err
@@ -71,30 +105,59 @@ func GenerateSpec(ctx context.Context, meta executor.Meta, mounts []executor.Mou
 		return nil, nil, err
 	}
 
+	if rlimitsOpts, err := generateRlimitOpts(meta.Ulimit); err == nil {
+		opts = append(opts, rlimitsOpts...)
+	} else {
+		return nil, nil, err
+	}
+
 	hostname := defaultHostname
 	if meta.Hostname != "" {
 		hostname = meta.Hostname
 	}
 
+	if tracingSocket != "" {
+		// https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/protocol/exporter.md
+		meta.Env = append(meta.Env, tracingEnvVars...)
+		meta.Env = append(meta.Env, traceexec.Environ(ctx)...)
+	}
+
 	opts = append(opts,
-		oci.WithProcessArgs(meta.Args...),
+		withProcessArgs(meta.Args...),
 		oci.WithEnv(meta.Env),
 		oci.WithProcessCwd(meta.Cwd),
 		oci.WithNewPrivileges,
 		oci.WithHostname(hostname),
 	)
 
+	if cdiManager != nil {
+		if cdiOpts, err := generateCDIOpts(cdiManager, meta.CDIDevices); err == nil {
+			opts = append(opts, cdiOpts...)
+		} else {
+			return nil, nil, err
+		}
+	}
+
 	s, err := oci.GenerateSpec(ctx, nil, c, opts...)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, errors.WithStack(err)
+	}
+
+	if cgroupV2NamespaceSupported() {
+		s.Linux.Namespaces = append(s.Linux.Namespaces, specs.LinuxNamespace{
+			Type: specs.CgroupNamespace,
+		})
+	}
+
+	if len(meta.Ulimit) == 0 {
+		// reset open files limit
+		s.Process.Rlimits = nil
 	}
 
 	// set the networking information on the spec
 	if err := namespace.Set(s); err != nil {
-		return nil, nil, err
+		return nil, nil, errors.WithStack(err)
 	}
-
-	s.Process.Rlimits = nil // reset open files limit
 
 	sm := &submounts{}
 
@@ -125,9 +188,25 @@ func GenerateSpec(ctx context.Context, meta executor.Meta, mounts []executor.Mou
 		}
 		releasers = append(releasers, release)
 		for _, mount := range mounts {
+			mount, release, err := compactLongOverlayMount(mount, m.Readonly)
+			if err != nil {
+				releaseAll()
+				return nil, nil, err
+			}
+
+			if release != nil {
+				releasers = append(releasers, release)
+			}
+
 			mount, err = sm.subMount(mount, m.Selector)
 			if err != nil {
 				releaseAll()
+				var os *os.PathError
+				if errors.As(err, &os) {
+					if strings.HasSuffix(os.Path, m.Selector) {
+						os.Path = m.Selector
+					}
+				}
 				return nil, nil, err
 			}
 			s.Mounts = append(s.Mounts, specs.Mount{
@@ -139,12 +218,32 @@ func GenerateSpec(ctx context.Context, meta executor.Meta, mounts []executor.Mou
 		}
 	}
 
+	if tracingSocket != "" {
+		// moby/buildkit#4764
+		if _, err := os.Stat(tracingSocket); err == nil {
+			if mount := getTracingSocketMount(tracingSocket); mount != nil {
+				s.Mounts = append(s.Mounts, *mount)
+			}
+		}
+	}
+
+	s.Mounts = dedupMounts(s.Mounts)
+
+	if userns.RunningInUserNS() {
+		s.Mounts, err = rootlessmountopts.FixUpOCI(s.Mounts)
+		if err != nil {
+			releaseAll()
+			return nil, nil, err
+		}
+	}
+
 	return s, releaseAll, nil
 }
 
 type mountRef struct {
 	mount   mount.Mount
 	unmount func() error
+	subRefs map[string]mountRef
 }
 
 type submounts struct {
@@ -158,14 +257,21 @@ func (s *submounts) subMount(m mount.Mount, subPath string) (mount.Mount, error)
 	if s.m == nil {
 		s.m = map[uint64]mountRef{}
 	}
-	h, err := hashstructure.Hash(m, nil)
+	h, err := hashstructure.Hash(m, hashstructure.FormatV2, nil)
 	if err != nil {
-		return mount.Mount{}, nil
+		return mount.Mount{}, errors.WithStack(err)
 	}
 	if mr, ok := s.m[h]; ok {
-		sm, err := sub(mr.mount, subPath)
+		if sm, ok := mr.subRefs[subPath]; ok {
+			return sm.mount, nil
+		}
+		sm, unmount, err := sub(mr.mount, subPath)
 		if err != nil {
-			return mount.Mount{}, nil
+			return mount.Mount{}, err
+		}
+		mr.subRefs[subPath] = mountRef{
+			mount:   sm,
+			unmount: unmount,
 		}
 		return sm, nil
 	}
@@ -177,25 +283,19 @@ func (s *submounts) subMount(m mount.Mount, subPath string) (mount.Mount, error)
 		return mount.Mount{}, err
 	}
 
-	opts := []string{"rbind"}
-	for _, opt := range m.Options {
-		if opt == "ro" {
-			opts = append(opts, opt)
-		}
-	}
-
 	s.m[h] = mountRef{
-		mount: mount.Mount{
-			Source:  mp,
-			Type:    "bind",
-			Options: opts,
-		},
+		mount:   bind(mp, m.ReadOnly()),
 		unmount: lm.Unmount,
+		subRefs: map[string]mountRef{},
 	}
 
-	sm, err := sub(s.m[h].mount, subPath)
+	sm, unmount, err := sub(s.m[h].mount, subPath)
 	if err != nil {
 		return mount.Mount{}, err
+	}
+	s.m[h].subRefs[subPath] = mountRef{
+		mount:   sm,
+		unmount: unmount,
 	}
 	return sm, nil
 }
@@ -206,6 +306,9 @@ func (s *submounts) cleanup() {
 	for _, m := range s.m {
 		func(m mountRef) {
 			go func() {
+				for _, sm := range m.subRefs {
+					sm.unmount()
+				}
 				m.unmount()
 				wg.Done()
 			}()
@@ -214,23 +317,44 @@ func (s *submounts) cleanup() {
 	wg.Wait()
 }
 
-func sub(m mount.Mount, subPath string) (mount.Mount, error) {
-	src, err := fs.RootPath(m.Source, subPath)
-	if err != nil {
-		return mount.Mount{}, err
+func bind(p string, ro bool) mount.Mount {
+	m := mount.Mount{
+		Source: p,
 	}
-	m.Source = src
-	return m, nil
+	if runtime.GOOS != "windows" {
+		// Windows uses a mechanism similar to bind mounts, but will err out if we request
+		// a mount type it does not understand. Leaving the mount type empty on Windows will
+		// yield the same result.
+		m.Type = "bind"
+		m.Options = []string{"rbind"}
+	}
+	if ro {
+		m.Options = append(m.Options, "ro")
+	}
+	return m
 }
 
-func specMapping(s []idtools.IDMap) []specs.LinuxIDMapping {
-	var ids []specs.LinuxIDMapping
-	for _, item := range s {
-		ids = append(ids, specs.LinuxIDMapping{
-			HostID:      uint32(item.HostID),
-			ContainerID: uint32(item.ContainerID),
-			Size:        uint32(item.Size),
-		})
+func compactLongOverlayMount(m mount.Mount, ro bool) (mount.Mount, func() error, error) {
+	if m.Type != "overlay" {
+		return m, nil, nil
 	}
-	return ids
+
+	sz := 0
+	for _, opt := range m.Options {
+		sz += len(opt) + 1
+	}
+
+	// can fit to single page, no need to compact
+	if sz < 4096-512 {
+		return m, nil, nil
+	}
+
+	lm := snapshot.LocalMounterWithMounts([]mount.Mount{m})
+
+	mp, err := lm.Mount()
+	if err != nil {
+		return mount.Mount{}, nil, err
+	}
+
+	return bind(mp, ro), lm.Unmount, nil
 }
